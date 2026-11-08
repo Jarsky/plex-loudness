@@ -196,10 +196,10 @@ def cmd_import(config, args) -> int:
         if plan.statements:
             print("Dry run. First change:\n  " + plan.statements[0][:300])
         return 0
-    if not args.yes and sys.stdin.isatty():
-        if input(f"Back up the database and write {plan.write} audio tracks into Plex? [y/N] ").lower() != "y":
-            print("Cancelled")
-            return 1
+    question = f"Back up the database and write {plan.write} audio tracks into Plex? [y/N] "
+    if not args.yes and sys.stdin.isatty() and input(question).lower() != "y":
+        print("Cancelled")
+        return 1
     result = apply_import(db, plan, backup=not args.no_backup)
     print(f"Verified: {result['verified']}/{result['written']} tracks now carry loudness data")
     if not args.source.endswith(".jsonl"):

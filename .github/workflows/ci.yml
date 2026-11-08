@@ -1,0 +1,53 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[tui,dev]'
+      - run: ruff check .
+      - run: pytest -q
+      - name: TUI renders (demo data)
+        run: python docs/screenshots.py
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t plex-loudness:ci .
+      - name: End to end - queue a generated clip, measure it with a worker
+        run: |
+          mkdir -p media/movies/Test work && chmod -R 777 media work
+          # 20 s of tone with a video track, like a real file: video = stream 0, audio = stream 1
+          docker run --rm -v "$PWD/media:/media" --entrypoint ffmpeg plex-loudness:ci -v error \
+            -f lavfi -i testsrc2=s=640x360:d=20 -f lavfi -i "sine=f=440:d=20" \
+            -map 0:v -map 1:a -c:v libx264 -c:a ac3 -ac 2 "/media/movies/Test/Test.2026.mkv"
+          docker run --rm plex-loudness:ci plex-loudness --version
+          # a batch as the controller would write it, using the path as Plex sees it (/movies/...)
+          docker run --rm -v "$PWD/work:/work" plex-loudness:ci python -c "
+          from plex_loudness.batches import Queue; from plex_loudness.analysis import FULL
+          job = {'part_id': 1, 'item_id': 1, 'file': '/movies/Test/Test.2026.mkv', 'size': 1, 'duration_ms': 20000,
+                 'library': 'Movies', 'title': 'Test (2026)', 'streams': [{'stream_id': 42, 'index': 1, 'codec': 'ac3'}]}
+          print(Queue('/work').create('ci', [job], FULL.as_dict(), 'ci', 'ci').id)"
+          docker run --rm -v "$PWD/media:/media:ro" -v "$PWD/work:/work" -e WORKERS=2 plex-loudness:ci \
+            plex-loudness-worker --once | tee worker.log
+          grep -q "auto path map: /movies -> /media/movies" worker.log
+          python3 - <<'PY'
+          import glob, json
+          rows = [json.loads(l) for f in glob.glob("work/batches/*/results/*.jsonl") for l in open(f)]
+          assert rows and rows[0]["status"] == "ok", rows
+          print("measured:", rows[0]["ln"])
+          PY
+          docker run --rm -v "$PWD/work:/work" plex-loudness:ci plex-loudness status --no-plex

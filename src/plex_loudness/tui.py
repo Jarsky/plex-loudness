@@ -5,15 +5,25 @@ from __future__ import annotations
 import os
 import time
 
-from rich import box
 from rich.table import Table
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (Button, Checkbox, DataTable, Input, Label, ProgressBar, RadioButton, RadioSet, RichLog,
-                             SelectionList, Static)
+from textual.widgets import (
+    Button,
+    Checkbox,
+    DataTable,
+    Input,
+    Label,
+    ProgressBar,
+    RadioButton,
+    RadioSet,
+    RichLog,
+    SelectionList,
+    Static,
+)
 
 from . import __version__
 from .analysis import FULL, QUICK
@@ -129,7 +139,7 @@ class LoudnessApp(App):
     RadioSet {{ border: round #4a4a4a; background: transparent; width: 1fr; }}
     RadioSet:focus {{ border: round {PINK}; }}
     Checkbox {{ border: none; background: transparent; padding: 0; margin-top: 1; }}
-    DataTable {{ background: transparent; height: 1fr; scrollbar-size-vertical: 1; }}
+    DataTable {{ background: transparent; height: 1fr; scrollbar-size-vertical: 1; scrollbar-size-horizontal: 0; }}
     DataTable > .datatable--header {{ background: transparent; color: grey; text-style: bold; }}
     DataTable > .datatable--cursor {{ background: {VIOLET} 40%; color: white; }}
     DataTable > .datatable--even-row {{ background: white 3%; }}
@@ -255,7 +265,9 @@ class LoudnessApp(App):
         for _ in range(4):
             grid.add_column(style="grey62", no_wrap=True, ratio=2)
             grid.add_column(justify="left", no_wrap=True, ratio=2)
-        cell = lambda v, style="bold #e0e0e0": Text(str(v), style=style)
+        def cell(value, style="bold #e0e0e0") -> Text:
+            return Text(str(value), style=style)
+
         grid.add_row("Analysed", cell(f"{done:,} / {items:,}" if items else "…"),
                      "Queued", cell(f"{pending:,} tracks", f"bold {VIOLET}"),
                      "Running", cell(running, f"bold {CYAN}"),
@@ -299,7 +311,9 @@ class LoudnessApp(App):
 
     # ------------------------------------------------------------------ filter / preview / queue
     def current_filter(self) -> Filter:
-        value = lambda wid: self.query_one(f"#{wid}", Input).value
+        def value(widget_id: str) -> str:
+            return self.query_one(f"#{widget_id}", Input).value
+
         year_from, year_to = parse_years(value("year"))
         limit = value("limit").strip()
         return Filter(sections=list(self.query_one("#libs", SelectionList).selected),
@@ -380,7 +394,7 @@ class LoudnessApp(App):
                           f"{s['tracks']:,}", Text(f"{s['ok']:,}", style=MINT if done else ""),
                           Text(f"{s['failed']:,}", style="#ff5f5f" if s["failed"] else "grey50"),
                           Text(str(s["running"]), style=CYAN if s["running"] else "grey50"),
-                          f"{s['hours_done']:,.0f}/{s['hours']:,.0f}", Text(s["filter"][:44], style="grey62"),
+                          f"{s['hours_done']:,.0f}/{s['hours']:,.0f}", Text(s["filter"][:30], style="grey62"),
                           key=s["id"])
         ids = [s["id"] for s in ordered]
         if keep in ids:

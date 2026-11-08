@@ -1,0 +1,23 @@
+# Mount the media and the shared folder straight from SMB shares (e.g. a NAS) instead of host
+# paths - handy for a desktop worker under Docker Desktop. Add it in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.cifs.yml
+#   SMB_HOST=nas.local  SMB_MEDIA=media  SMB_WORK=share/plex-loudness  SMB_USER=...  SMB_PASSWORD=...
+services:
+  plex-loudness:
+    volumes:
+      - media:/media:ro
+      - work:/work
+
+volumes:
+  media:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: "//${SMB_HOST:?set SMB_HOST}/${SMB_MEDIA:-media}"
+      o: "ro,vers=3.0,username=${SMB_USER:-guest},password=${SMB_PASSWORD:-},uid=${PUID:-1000},gid=${PGID:-1000}"
+  work:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: "//${SMB_HOST:?set SMB_HOST}/${SMB_WORK:?set SMB_WORK}"
+      o: "vers=3.0,username=${SMB_USER:-guest},password=${SMB_PASSWORD:-},uid=${PUID:-1000},gid=${PGID:-1000},file_mode=0666,dir_mode=0777"

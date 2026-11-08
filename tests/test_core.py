@@ -51,7 +51,8 @@ def test_sampling_uses_one_concat_input(tmp_path):
     cmd, total, listing = ffmpeg_command("/m/It's a film.mkv", 2, 6000, QUICK)
     try:
         assert cmd.count("-i") == 1 and "concat" in cmd and total == 24 * 30
-        text = open(listing).read()
+        with open(listing) as handle:
+            text = handle.read()
         assert text.count("inpoint") == 24 and "It'\\''s a film" in text
     finally:
         import os

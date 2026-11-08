@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.1
+- README: why this exists (Plex forum reports), banner, screenshot, desktop-worker guide.
+- `docker-compose.cifs.yml`: mount the media and shared folder from SMB shares (Docker Desktop).
+- GitHub Actions: CI (ruff, pytest on 3.11/3.13, demo screenshots, Docker end-to-end test that
+  measures a generated clip with a worker) and Release (multi-arch image to GHCR on `v*` tags).
+- `docs/screenshots.py` regenerates the banner and screenshot from demo data.
+- `WORK_PATH` defaults to `./work`; thousands separators in import summaries; tidier batch table.
+
 ## 2.1.0
 - TUI restyled in the media-health look: neon figlet header, overview panel with progress bar,
   rounded colour-coded panels, coloured batch states, key hints.

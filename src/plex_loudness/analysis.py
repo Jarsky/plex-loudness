@@ -9,8 +9,8 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from . import __version__
 from .extradata import LOUDNORM, loudness_fields
@@ -40,7 +40,7 @@ class Mode:
         return {"samples": self.samples, "seconds": self.seconds, "name": self.name}
 
     @classmethod
-    def parse(cls, name: str, samples: int = 0, seconds: float = 30) -> "Mode":
+    def parse(cls, name: str, samples: int = 0, seconds: float = 30) -> Mode:
         if name == "full":
             return FULL
         if name == "quick":
@@ -52,7 +52,7 @@ class Mode:
         raise ValueError(f"Unknown mode {name!r} (full, quick, sampled)")
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Mode":
+    def from_dict(cls, data: dict) -> Mode:
         return cls(int(data.get("samples", 0)), float(data.get("seconds", 30)))
 
 

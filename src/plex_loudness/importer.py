@@ -22,13 +22,13 @@ class ImportPlan:
     stream_ids: list[int] = field(default_factory=list)
 
     def describe(self) -> str:
-        bits = [f"{self.write} to write"]
+        bits = [f"{self.write:,} to write"]
         for count, text in ((self.has_data, "already have data"), (self.gone, "no longer in Plex"),
                             (self.changed_file, "file changed since measuring"),
                             (self.sampled_skipped, "sampled (not imported without --allow-sampled)"),
                             (self.failed, "failed measurements")):
             if count:
-                bits.append(f"{count} {text}")
+                bits.append(f"{count:,} {text}")
         return ", ".join(bits)
 
 

@@ -25,5 +25,5 @@ services:
       - PLEX_CONTAINER=${PLEX_CONTAINER:-auto}
       - PLEX_USER=${PLEX_USER:-auto}
     volumes:
-      - ${WORK_PATH:?set WORK_PATH in .env}:/work
+      - ${WORK_PATH:-./work}:/work   # the shared folder (see .env)
       - ${MEDIA_PATH:-./no-media}:/media:ro

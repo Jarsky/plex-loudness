@@ -35,7 +35,7 @@ def url_encode(text: str) -> str:
         if char.isascii() and (char.isalnum() or char in "-_~"):
             out.append(char)
         else:
-            out.append("%%%02X" % byte)
+            out.append(f"%{byte:02X}")
     return "".join(out)
 
 

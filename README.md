@@ -8,12 +8,12 @@
 
 <p align="center"><img src="docs/banner.svg" alt="plex-loudness" width="760"></p>
 
-Fills in Plex's **video loudness data** — the measurements behind *Normalize Loudness* and
-*Boost Dialog* — with ffmpeg, in parallel, on as many machines as you like.
+Fills in Plex's **video loudness data** (the stuff behind *Normalize Loudness* and *Boost Dialog*)
+using ffmpeg, in parallel, on as many machines as you want to throw at it.
 
-The values are **identical to Plex's own**: Plex measures with ffmpeg's `loudnorm` filter, and
-plex-loudness runs the same filter with the same settings and writes the result in exactly the
-format Plex stores. In testing, every field of every track compared matched Plex's values, and
+The values come out **identical to Plex's own**. Plex measures with ffmpeg's `loudnorm` filter,
+so plex-loudness runs the same filter with the same settings and writes the result in exactly the
+format Plex stores. In testing, every field of every compared track matched what Plex had, and
 100,000 existing database rows were rebuilt byte for byte.
 
 ![The controller TUI](docs/screenshots/tui.svg)
@@ -21,25 +21,27 @@ format Plex stores. In testing, every field of every track compared matched Plex
 ## Why this exists
 
 Since Plex Media Server 1.43.4, Plex can [even out the volume of movies and TV](https://support.plex.tv/articles/audio-track-enhancements-for-video/)
-(*Normalize Loudness*, *Boost Dialog*) on supported clients. That needs every audio track to be
-analysed first, and Plex's own analysis doesn't scale to a large library:
+on supported clients. It's a great feature, especially for TV where every show seems to be mixed
+at a different level. The catch is that every audio track has to be analysed first, and Plex's
+own analysis really struggles with a big library:
 
-* **One file at a time.** The analysis is a single background job on the server, using about one
-  CPU core. It measures the whole soundtrack at true-peak precision, which runs at a few times real
-  time — so a library with tens of thousands of hours of audio takes *months*, however many cores
-  the server has.
-* **Memory runaways.** On some files (in our case several 4K Dolby Digital+/TrueHD/DTS-HD remuxes) the job
-  grows until it hits the container's memory limit and is killed — sometimes taking the Plex server
-  process with it. A failed item is retried after every restart, so it can happen again and again.
-  Others have reported the same:
+* **It does one file at a time.** The analysis is a single background job using about one CPU
+  core, and it measures the whole soundtrack at true-peak precision. That runs at a few times real
+  time, so a library with tens of thousands of hours of audio takes *months*, no matter how many
+  cores the server has.
+* **It can eat all your memory.** On some files (often 4K remuxes with Dolby Digital+, TrueHD or
+  DTS-HD audio) the job keeps growing until it hits the container's memory limit and gets killed,
+  sometimes taking Plex down with it. Failed items get retried after every restart, so it just
+  keeps happening. Plenty of people have hit this:
   [loudness data generation memory leak](https://forums.plex.tv/t/loudness-data-generation-memory-leak/804550),
   [analyze-loudness runaway memory usage](https://forums.plex.tv/t/plex-media-scanner-analyze-loudness-runaway-memory-usage/712960),
   [memory leaks with "Analyze audio tracks for loudness"](https://forums.plex.tv/t/memory-leaks-when-enable-the-option-of-analyze-audio-tracks-for-loudness/776490).
-* **It competes with playback** on the same machine, all day, for as long as the backlog lasts.
+* **It fights with playback** on the same machine, all day, for as long as the backlog lasts.
 
-plex-loudness does the same measurement outside Plex: with stock ffmpeg (no Plex transcoder, no
-EAE audio service), one process per track, spread over every core of every machine you point at
-it. Once the backlog is imported, Plex's own analysis can be switched back on to handle new files.
+So plex-loudness does the same measurement outside of Plex. It uses stock ffmpeg (no Plex
+transcoder, no EAE audio service), runs one process per track, and spreads the work over every
+core on every machine you point at it. Once the backlog is imported you can turn Plex's own
+analysis back on and let it handle new files as they arrive.
 
 ## How it works
 
@@ -52,14 +54,14 @@ it. Once the backlog is imported, Plex's own analysis can be switched back on to
  └───────────────────────────────────────────────┘          └──────────────────────────────────────────────┘
 ```
 
-The **controller** and the **workers** are separate on purpose:
+The **controller** and the **workers** are split up on purpose:
 
-* The controller is light. It only needs to reach the Plex database, so it runs next to Plex.
-* Measuring is pure CPU (one core per track). Workers can run **wherever the cores are** — the NAS
-  next to the disks, or a much more powerful **desktop** while you're not using it — and as many
-  as you like at once. Tracks are claimed atomically, so workers never duplicate work, and a worker
-  that disappears has its tracks taken over after 10 minutes.
-* Workers never touch the Plex database; they only read media and the shared folder.
+* The controller is lightweight. It only needs to reach the Plex database, so it lives next to Plex.
+* Measuring is pure CPU work (one core per track), so workers can run **wherever the cores are**.
+  That might be the NAS sitting next to the disks, or a beefy **desktop** while you're not using
+  it. Run as many as you like at once. Tracks are claimed atomically so workers never double up,
+  and if a worker disappears its tracks get picked up by the others after 10 minutes.
+* Workers never touch the Plex database. They only read your media and the shared folder.
 
 ### What Plex stores
 
@@ -75,11 +77,12 @@ Per audio stream, in `media_streams.extra_data`, measured with
 | `ln:gainOffset` | `target_offset` | offset after loudnorm's normalisation |
 | `ln:loudnessAnalysisVersion` | `0.02` | |
 
-Music libraries use different fields (`ld:*`) and aren't handled — Plex's music analysis copes fine.
+Music libraries use different fields (`ld:*`) and aren't handled here, since Plex's music
+analysis copes fine on its own.
 
 ## Setup (Docker)
 
-One container, configured in `.env`, in the same style as [media-health](https://github.com/Jarsky/media-health).
+It's one container, configured with a `.env` file, in the same style as [media-health](https://github.com/Jarsky/media-health).
 
 ```bash
 git clone https://github.com/Jarsky/plex-loudness && cd plex-loudness
@@ -96,19 +99,20 @@ docker exec -it plex-loudness plex-loudness     # the TUI   (or ./plex-loudness)
 | `controller` | the machine running Plex | `WORK_PATH`, docker socket |
 | `worker` | wherever the CPU is: NAS, desktop, … (any number) | `WORK_PATH`, `MEDIA_PATH`, `PUID`/`PGID` |
 
-* **`WORK_PATH`** is the shared folder. The controller and every worker must see the same folder
-  (e.g. a NAS share mounted on each machine).
-* The **docker socket** comes from `docker-compose.controller.yml`; `.env.example` sets
-  `COMPOSE_FILE` for it. Remove that line on worker-only machines.
-* **Auto-detected:** the Plex container (the one with Plex SQLite in it), the database owner, and
-  where Plex's folders (`/tv`, `/movies`, …) live under `MEDIA_PATH` — the worker looks for a real
-  file, then remembers the mapping. Override with `PLEX_CONTAINER`, `PLEX_USER`, `PATH_MAP`.
+* **`WORK_PATH`** is the shared folder. The controller and every worker need to see the same
+  folder, for example a NAS share mounted on each machine.
+* The **docker socket** comes from `docker-compose.controller.yml`, and `.env.example` sets
+  `COMPOSE_FILE` to include it. Remove that line on worker-only machines.
+* **Auto-detected:** the Plex container (whichever one has Plex SQLite in it), the database owner,
+  and where Plex's folders (`/tv`, `/movies`, …) live under `MEDIA_PATH`. The worker finds a real
+  file, works out the mapping, and remembers it. You can override any of these with
+  `PLEX_CONTAINER`, `PLEX_USER` and `PATH_MAP`.
 
 ### A worker on your desktop
 
-A desktop CPU with 16+ threads can clear a backlog several times faster than a NAS. With Docker
-(Docker Desktop on Windows/macOS, or Docker on Linux), mount the NAS shares straight into the
-container with the SMB override:
+A desktop CPU with 16+ threads can chew through a backlog several times faster than a NAS. With
+Docker (Docker Desktop on Windows/macOS, or plain Docker on Linux) you can mount the NAS shares
+straight into the container using the SMB override:
 
 ```bash
 # .env on the desktop
@@ -124,34 +128,35 @@ CPUS=14
 WORKER_NAME=desktop
 ```
 
-`docker compose up -d --build`, and the desktop shows up in the controller's worker list within
-seconds. Stop it any time with `docker compose stop` — its running tracks are handed back to the
-other workers.
+Run `docker compose up -d --build` and the desktop pops up in the controller's worker list within
+a few seconds. Stop it whenever you like with `docker compose stop`, and whatever it was working on
+gets handed back to the other workers.
 
-Without Docker: `pip install .` plus ffmpeg on the PATH, then `plex-loudness-worker`, with
-`WORK_DIR`, `MEDIA_ROOT` (and if needed `PATH_MAP`) as environment variables. This route is
-tested on Linux only.
+Not using Docker? `pip install .`, put ffmpeg on your PATH, then run `plex-loudness-worker` with
+`WORK_DIR`, `MEDIA_ROOT` (and `PATH_MAP` if needed) set as environment variables. This has only
+been tested on Linux so far.
 
 ## The TUI
 
-* **queue work** — pick libraries (with how much each already has), optionally a date-added window
-  and/or release years and a file limit, choose *full* or *quick*, **preview** (`p`: files, tracks,
-  hours, ETA at the current worker speed), **queue batch** (`a`).
-* **batches** — progress of each batch; **import into plex** (`i`: shows what it will write and
-  asks first), **retry failed** (`t`), **cancel / resume** (`c`), **delete** (`d`).
-* **now measuring** — every track being measured on every worker, with progress and memory.
-* **overview** — analysed vs total, queued, running, failed, ready to import, speed and ETA.
+* **queue work**: pick libraries (it shows how much each one already has), optionally a
+  date-added window and/or release years and a file limit, choose *full* or *quick*, hit
+  **preview** (`p`) to see files, tracks, hours and an ETA at the current worker speed, then
+  **queue batch** (`a`).
+* **batches**: progress of each batch. **Import into plex** (`i`) shows what it's about to write and
+  asks first. There's also **retry failed** (`t`), **cancel / resume** (`c`) and **delete** (`d`).
+* **now measuring**: every track being measured on every worker, with progress and memory.
+* **overview**: analysed vs total, queued, running, failed, ready to import, speed and ETA.
 
 ## Measurement modes
 
 | Mode | Reads | Accuracy (vs full) | CPU |
 |---|---|---|---|
-| `full` (default) | the whole audio track | **exact** — Plex's own values | 1× |
+| `full` (default) | the whole audio track | **exact**, same as Plex | 1× |
 | `quick` | 24 × 30 s samples | loudness ±0.7 dB on average (worst ~1.7), peaks under-read | ~4× less |
 | `sampled` | N × S s samples | worse with fewer samples (5 × 10 s: ±1.3 dB avg, ±3 dB worst) | |
 
-Samples miss the loudest moments, so sampled peaks are almost always too low. `import` skips
-sampled results unless you pass `--allow-sampled`.
+Samples tend to miss the loudest moments, so sampled peaks almost always come out too low. That's
+why `import` skips sampled results unless you pass `--allow-sampled`.
 
 ## CLI
 
@@ -173,27 +178,29 @@ plex-loudness selftest                                 # rebuild existing rows b
 plex-loudness-worker [--workers 16] [--batch <id>] [--once]
 ```
 
-Dates accept `30d`, `6w`, `3m`, `1y` or `YYYY-MM-DD`; years accept `2001`, `1990-1999`, `2010-`,
-`-1980`.
+Dates accept `30d`, `6w`, `3m`, `1y` or `YYYY-MM-DD`. Years accept `2001`, `1990-1999`, `2010-`
+or `-1980`.
 
 ## Safety
 
-This writes to the Plex library database, which Plex doesn't officially support. So every import:
+This writes to the Plex library database, which Plex doesn't officially support, so it's careful
+about it. Every import:
 
-* takes an online backup of the database first (SQLite `.backup`, safe while Plex runs);
-* changes nothing but the loudness fields of the audio streams it measured, matched by Plex's own
-  stream id, and never replaces data Plex already has (unless `--overwrite`);
-* skips any file whose size changed since it was measured (an upgrade from Radarr/Sonarr, say);
-* writes in small transactions through Plex's own SQLite build, then reads every row back.
+* takes an online backup of the database first (SQLite `.backup`, safe while Plex is running);
+* only changes the loudness fields of the audio streams it measured, matched by Plex's own stream
+  id, and never replaces data Plex already has (unless you pass `--overwrite`);
+* skips any file whose size changed since it was measured (say Radarr or Sonarr upgraded it);
+* writes in small transactions through Plex's own SQLite build, then reads every row back to check.
 
-Start with a small batch, check it in Plex, then go big.
+Start with a small batch, check it looks right in Plex, then go big.
 
 ## Turning Plex's analysis back on
 
 The imported values are exactly what Plex would have written itself, so once the backlog is done
 you should be able to switch *Settings → Library → Analyze audio tracks for loudness* back on and
-let Plex handle new files. Check it on your server before relying on it: restart Plex and watch
-which files its `Plex Transcoder … loudnorm` processes open — imported items shouldn't appear.
+let Plex take care of new files. It's worth checking on your own server before relying on it:
+restart Plex and keep an eye on which files its `Plex Transcoder … loudnorm` processes open.
+Imported items shouldn't show up.
 
 ## Development
 
@@ -205,4 +212,4 @@ python docs/screenshots.py          # regenerate the banner and screenshots from
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). Not affiliated with Plex Inc.
+MIT, see [LICENSE](LICENSE). This is a hobby project and isn't affiliated with Plex Inc.

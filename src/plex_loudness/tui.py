@@ -1,16 +1,19 @@
-"""The plex-loudness controller TUI (Textual)."""
+"""The plex-loudness controller TUI (Textual), in the neon style of media-health."""
 
 from __future__ import annotations
 
 import os
 import time
 
+from rich import box
+from rich.table import Table
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input, Label, RadioButton, RadioSet,
-                             RichLog, SelectionList, Static)
+from textual.widgets import (Button, Checkbox, DataTable, Input, Label, ProgressBar, RadioButton, RadioSet, RichLog,
+                             SelectionList, Static)
 
 from . import __version__
 from .analysis import FULL, QUICK
@@ -19,6 +22,12 @@ from .catalog import Filter, libraries, parse_when, parse_years, preview, select
 from .config import Config
 from .importer import apply_import, plan_import
 from .plexdb import PlexDB
+
+NEON = ["#ff2bd6", "#d63bff", "#9b5cff", "#6a7dff", "#3fa0ff", "#22d3ee", "#22f5c8"]
+PINK, VIOLET, BLUE, CYAN, MINT = "#ff2bd6", "#9b5cff", "#3fa0ff", "#22d3ee", "#22f5c8"
+STATE_STYLE = {"running": f"bold {CYAN}", "queued": VIOLET, "finished": f"bold {MINT}", "imported": "green",
+               "cancelled": "grey50"}
+_FIGLET: dict[str, str] = {}
 
 
 def human(seconds: float) -> str:
@@ -30,25 +39,49 @@ def human(seconds: float) -> str:
     return f"{seconds / 86400:.1f}d"
 
 
-class Confirm(ModalScreen[bool]):
-    DEFAULT_CSS = """
-    Confirm { align: center middle; }
-    #dialog { width: 72; height: auto; padding: 1 2; border: thick $warning; background: $surface; }
-    #dialog Horizontal { height: auto; margin-top: 1; align-horizontal: right; }
-    #dialog Button { margin-left: 2; }
-    """
-    BINDINGS = [("escape", "no", "Cancel")]
+def banner(width: int, height: int) -> Text:
+    """'PLEX LOUDNESS' in a neon gradient: big font, small font, or one line on cramped terminals."""
+    if not _FIGLET:
+        try:
+            import pyfiglet
+            for font in ("ansi_shadow", "small"):
+                _FIGLET[font] = pyfiglet.figlet_format("PLEX LOUDNESS", font=font, width=400).rstrip("\n")
+        except Exception:
+            pass
+    art = ""
+    if height >= 44:
+        art = _FIGLET.get("ansi_shadow", "")
+    if (not art or max(map(len, art.splitlines())) > width - 4) and height >= 36:
+        art = _FIGLET.get("small", "")
+    if not art or max(map(len, art.splitlines())) > width - 4:
+        art = "P L E X   L O U D N E S S"
+    lines = [line for line in art.splitlines() if line.strip()]
+    text = Text(justify="center")
+    for i, line in enumerate(lines):
+        text.append(line + "\n", style=f"bold {NEON[i * len(NEON) // max(len(lines), 1)]}")
+    return text
 
-    def __init__(self, message: str, yes: str = "Yes"):
+
+class Confirm(ModalScreen[bool]):
+    DEFAULT_CSS = f"""
+    Confirm {{ align: center middle; background: black 60%; }}
+    #dialog {{ width: 74; height: auto; padding: 1 2; border: round {PINK}; background: #1e1e1e;
+               border-title-color: {PINK}; border-title-style: bold; border-title-align: center; }}
+    #dialog Horizontal {{ height: auto; margin-top: 1; align-horizontal: right; }}
+    """
+    BINDINGS = [("escape", "no", "Cancel"), ("y", "yes", "Yes")]
+
+    def __init__(self, message: str, yes: str = "Yes", title: str = "confirm"):
         super().__init__()
-        self.message, self.yes = message, yes
+        self.message, self.yes, self.title_text = message, yes, title
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialog"):
+        with Vertical(id="dialog") as dialog:
+            dialog.border_title = self.title_text
             yield Static(self.message)
             with Horizontal():
-                yield Button("Cancel", id="no")
-                yield Button(self.yes, id="yes", variant="warning")
+                yield Button("cancel", id="no")
+                yield Button(self.yes, id="yes", classes="go")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
@@ -56,27 +89,62 @@ class Confirm(ModalScreen[bool]):
     def action_no(self) -> None:
         self.dismiss(False)
 
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
 
 class LoudnessApp(App):
     TITLE = "plex-loudness"
-    CSS = """
-    #left { width: 58; border-right: solid $panel; padding: 0 1; }
-    #left Label { margin-top: 1; color: $text-muted; }
-    #libs { height: auto; max-height: 12; }
-    #preview { margin-top: 1; height: auto; color: $accent; }
-    .row { height: auto; }
-    .row Input { width: 1fr; }
-    .buttons { height: auto; margin-top: 1; }
-    .buttons Button { margin-right: 1; min-width: 10; }
-    #right { padding: 0 1; }
-    .title { text-style: bold; margin-top: 1; }
-    #batches { height: 12; }
-    #active { height: 1fr; min-height: 6; }
-    #workers { height: auto; color: $text-muted; }
-    #log { height: 8; border-top: solid $panel; }
+    CSS = f"""
+    Screen {{ background: #1e1e1e; color: #d0d0d0; layout: vertical; }}
+    #banner {{ height: auto; content-align: center top; padding-top: 1; }}
+    #subtitle {{ height: 1; content-align: center middle; color: grey; }}
+    .panel {{ border: round {VIOLET}; border-title-align: center; border-title-style: bold;
+              padding: 0 1; background: transparent; }}
+    #overview {{ height: auto; border: round {VIOLET}; border-title-color: {MINT}; margin: 0 1; }}
+    #stats {{ height: auto; }}
+    #overall {{ margin-top: 1; }}
+    #overall Bar {{ width: 1fr; }}
+    #overall Bar > .bar--bar {{ color: {PINK}; background: #3a3a3a; }}
+    #overall Bar > .bar--complete {{ color: {MINT}; }}
+    #overall PercentageStatus {{ color: #e0e0e0; text-style: bold; }}
+    #overall ETAStatus {{ display: none; }}
+    #main {{ height: 1fr; margin: 0 1; }}
+    #queue-panel {{ width: 60; border: round {PINK}; border-title-color: {PINK}; }}
+    #right {{ width: 1fr; }}
+    #batches-panel {{ height: 3fr; border: round {BLUE}; border-title-color: {BLUE}; }}
+    #now-panel {{ height: 2fr; border: round {CYAN}; border-title-color: {CYAN}; }}
+    #log {{ height: 7; border: round #6a7dff; border-title-color: #6a7dff; border-title-align: center;
+            border-title-style: bold; background: transparent; margin: 0 1; padding: 0 1; }}
+    #hints {{ height: 1; color: grey; content-align: center middle; }}
+    .hint {{ color: grey; margin-top: 1; }}
+    #preview {{ margin-top: 1; height: auto; }}
+    #workers {{ height: auto; color: grey; }}
+    Input {{ border: round #4a4a4a; background: transparent; height: 3; }}
+    Input:focus {{ border: round {PINK}; }}
+    .row {{ height: auto; }}
+    .row Input {{ width: 1fr; }}
+    SelectionList {{ border: round #4a4a4a; background: transparent; height: auto; max-height: 12; }}
+    SelectionList:focus {{ border: round {PINK}; }}
+    RadioSet {{ border: round #4a4a4a; background: transparent; width: 1fr; }}
+    RadioSet:focus {{ border: round {PINK}; }}
+    Checkbox {{ border: none; background: transparent; padding: 0; margin-top: 1; }}
+    DataTable {{ background: transparent; height: 1fr; scrollbar-size-vertical: 1; }}
+    DataTable > .datatable--header {{ background: transparent; color: grey; text-style: bold; }}
+    DataTable > .datatable--cursor {{ background: {VIOLET} 40%; color: white; }}
+    DataTable > .datatable--even-row {{ background: white 3%; }}
+    .buttons {{ height: auto; margin-top: 1; }}
+    Button {{ border: round #6a7dff; background: transparent; color: #d0d0d0; height: 3; min-width: 10;
+              margin-right: 1; text-style: bold; }}
+    Button:hover {{ background: {VIOLET} 25%; }}
+    Button:focus {{ text-style: bold reverse; }}
+    Button.go {{ border: round {PINK}; color: {PINK}; }}
+    Button.ok {{ border: round {MINT}; color: {MINT}; }}
+    Button.danger {{ border: round #ff5f5f; color: #ff5f5f; }}
     """
-    BINDINGS = [("q", "quit", "Quit"), ("r", "reload_libraries", "Reload libraries"),
-                ("p", "preview", "Preview"), ("i", "import_batch", "Import"), ("f5", "refresh", "Refresh")]
+    BINDINGS = [("q", "quit", "quit"), ("p", "preview", "preview"), ("a", "queue", "queue"),
+                ("i", "import_batch", "import"), ("t", "retry", "retry"), ("c", "cancel", "cancel"),
+                ("d", "delete", "delete"), ("l", "reload_libraries", "libraries"), ("f5", "refresh", "refresh")]
 
     def __init__(self, config: Config):
         super().__init__()
@@ -84,60 +152,123 @@ class LoudnessApp(App):
         self.db = PlexDB(config.plex)
         self.queue = Queue(config.work_dir)
         self.library_names: dict[int, str] = {}
+        self.library_rows: list[dict] = []
         self.selected_batch: str | None = None
+        self.summaries: list[dict] = []
+        self.worker_rows: list[dict] = []
 
-    # ---- layout
+    # ------------------------------------------------------------------ layout
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal():
-            with VerticalScroll(id="left"):
-                yield Label("Libraries (space to toggle)")
+        yield Static(id="banner")
+        yield Static(id="subtitle")
+        with Vertical(id="overview", classes="panel") as overview:
+            overview.border_title = "overview"
+            yield Static(id="stats")
+            yield ProgressBar(id="overall", total=100, show_eta=False)
+        with Horizontal(id="main"):
+            with VerticalScroll(id="queue-panel", classes="panel") as panel:
+                panel.border_title = "queue work"
+                yield Label("libraries  [dim](space toggles)[/]", classes="hint")
                 yield SelectionList[int](id="libs")
-                yield Label("Added since / before  (30d, 6m, 1y, YYYY-MM-DD)")
+                yield Label("added since / before  [dim]30d · 6m · 1y · YYYY-MM-DD[/]", classes="hint")
                 with Horizontal(classes="row"):
                     yield Input(placeholder="since", id="since")
                     yield Input(placeholder="before", id="before")
-                yield Label("Release year  (2001, 1990-1999, 2010-)")
-                yield Input(placeholder="any year", id="year")
-                yield Label("Limit files  (empty = all; newest first)")
-                yield Input(placeholder="all", id="limit", type="integer")
-                yield Label("Measurement")
+                yield Label("release year  [dim]2001 · 1990-1999 · 2010-[/]", classes="hint")
+                with Horizontal(classes="row"):
+                    yield Input(placeholder="any year", id="year")
+                    yield Input(placeholder="max files", id="limit", type="integer")
+                yield Label("measurement", classes="hint")
                 with RadioSet(id="mode"):
-                    yield RadioButton("Full: exact, same values as Plex", value=True, id="mode-full")
-                    yield RadioButton("Quick: 24x30 s samples, ~0.7 dB off", id="mode-quick")
-                yield Checkbox("Include tracks Plex already analysed", id="include-done")
-                yield Static("[dim]Pick libraries and filters, then Preview[/]", id="preview")
+                    yield RadioButton("full   exact, same values as Plex", value=True, id="mode-full")
+                    yield RadioButton("quick  24×30 s samples, ~0.7 dB off", id="mode-quick")
+                yield Checkbox("include tracks Plex already analysed", id="include-done")
+                yield Static("[dim]pick libraries and filters, then preview[/]", id="preview")
                 with Horizontal(classes="buttons"):
-                    yield Button("Preview", id="preview-btn")
-                    yield Button("Queue batch", id="queue-btn", variant="primary")
+                    yield Button("preview", id="preview-btn")
+                    yield Button("queue batch", id="queue-btn", classes="go")
             with Vertical(id="right"):
-                yield Static("Batches", classes="title")
-                yield DataTable(id="batches", cursor_type="row", zebra_stripes=True)
-                with Horizontal(classes="buttons"):
-                    yield Button("Import into Plex", id="import-btn", variant="warning")
-                    yield Button("Retry failed", id="retry-btn")
-                    yield Button("Cancel / resume", id="cancel-btn")
-                    yield Button("Delete", id="delete-btn", variant="error")
-                yield Static("Running now", classes="title")
-                yield DataTable(id="active", zebra_stripes=True)
-                yield Static("", id="workers")
-        yield RichLog(id="log", wrap=True, markup=True)
-        yield Footer()
+                with Vertical(id="batches-panel", classes="panel") as panel:
+                    panel.border_title = "batches"
+                    yield DataTable(id="batches", cursor_type="row", zebra_stripes=True)
+                    with Horizontal(classes="buttons"):
+                        yield Button("import into plex", id="import-btn", classes="ok")
+                        yield Button("retry failed", id="retry-btn")
+                        yield Button("cancel / resume", id="cancel-btn")
+                        yield Button("delete", id="delete-btn", classes="danger")
+                with Vertical(id="now-panel", classes="panel") as panel:
+                    panel.border_title = "now measuring"
+                    yield DataTable(id="active", zebra_stripes=True)
+                    yield Static(id="workers")
+        log = RichLog(id="log", wrap=True, markup=True)
+        log.border_title = "activity"
+        yield log
+        yield Static(id="hints")
 
     def on_mount(self) -> None:
-        self.sub_title = f"v{__version__} | work dir {self.config.work_dir}"
         self.query_one("#batches", DataTable).add_columns(
-            "Batch", "Mode", "State", "Tracks", "OK", "Failed", "Running", "Audio h", "Filter")
-        self.query_one("#active", DataTable).add_columns("Worker", "Elapsed", "Done", "Mem", "Title", "Track")
-        self.log_line(f"Config: {self.config.source or 'defaults'}")
+            "batch", "mode", "state", "tracks", "ok", "failed", "running", "audio h", "filter")
+        self.query_one("#active", DataTable).add_columns("worker", "elapsed", "done", "mem", "title", "track")
+        keys = [("q", "quit"), ("p", "preview"), ("a", "add batch"), ("i", "import"), ("t", "retry failed"),
+                ("c", "cancel/resume"), ("d", "delete"), ("l", "reload libraries"), ("tab", "next field")]
+        self.query_one("#hints", Static).update(
+            Text.from_markup("  ·  ".join(f"[bold {CYAN}]{k}[/] {v}" for k, v in keys)))
+        self.draw_banner()
+        self.log_line(f"config: {self.config.source or 'defaults'}  ·  work dir {self.config.work_dir}")
         self.action_reload_libraries()
         self.action_refresh()
         self.set_interval(3, self.action_refresh)
 
-    def log_line(self, text: str) -> None:
-        self.query_one("#log", RichLog).write(f"[dim]{time.strftime('%H:%M:%S')} |[/] {text}")
+    def on_resize(self) -> None:
+        self.draw_banner()
 
-    # ---- libraries
+    def draw_banner(self) -> None:
+        size = self.size
+        self.query_one("#banner", Static).update(banner(size.width, size.height))
+        self.query_one("#banner", Static).display = size.height >= 30
+
+    def update_subtitle(self) -> None:
+        alive = [w for w in self.worker_rows if w["alive"]]
+        rate = sum(w.get("rate", 0) for w in alive)
+        bits = [f"v{__version__}", f"plex: {self.db.describe()}",
+                f"{len(alive)} worker{'s' if len(alive) != 1 else ''} · {sum(w.get('slots', 0) for w in alive)} slots",
+                f"{rate:.0f}× real time" if rate else "idle", self.config.work_dir]
+        self.query_one("#subtitle", Static).update(Text("  ·  ".join(bits), style="grey62", justify="center"))
+
+    def log_line(self, text: str) -> None:
+        self.query_one("#log", RichLog).write(Text.from_markup(f"[grey50]{time.strftime('%H:%M:%S')}[/]  {text}"))
+
+    # ------------------------------------------------------------------ overview
+    def update_overview(self) -> None:
+        items = sum(r["items"] for r in self.library_rows)
+        done = sum(r["done"] for r in self.library_rows)
+        active = [s for s in self.summaries if s["state"] in ("running", "queued")]
+        pending = sum(s["tracks"] - s["ok"] - s["failed"] for s in active)
+        pending_h = sum(s["hours"] - s["hours_done"] for s in active)
+        running = sum(s["running"] for s in self.summaries)
+        failed = sum(s["failed"] for s in self.summaries if s["state"] != "imported")
+        to_import = sum(s["ok"] for s in self.summaries if s["state"] in ("finished", "running", "queued"))
+        alive = [w for w in self.worker_rows if w["alive"]]
+        rate = sum(w.get("rate", 0) for w in alive)
+        eta = human(pending_h * 3600 / rate) if rate and pending_h else "—"
+        grid = Table.grid(expand=True, padding=(0, 2))
+        for _ in range(4):
+            grid.add_column(style="grey62", no_wrap=True, ratio=2)
+            grid.add_column(justify="left", no_wrap=True, ratio=2)
+        cell = lambda v, style="bold #e0e0e0": Text(str(v), style=style)
+        grid.add_row("Analysed", cell(f"{done:,} / {items:,}" if items else "…"),
+                     "Queued", cell(f"{pending:,} tracks", f"bold {VIOLET}"),
+                     "Running", cell(running, f"bold {CYAN}"),
+                     "Workers", cell(f"{len(alive)} alive", f"bold {MINT}" if alive else "bold #ff5f5f"))
+        grid.add_row("Ready to import", cell(f"{to_import:,} tracks", f"bold {MINT}"),
+                     "Audio left", cell(f"{pending_h:,.0f} h"),
+                     "Failed", cell(failed, "bold #ff5f5f" if failed else "bold #e0e0e0"),
+                     "ETA", cell(f"{eta}  ({rate:.0f}×)" if rate else eta))
+        self.query_one("#stats", Static).update(grid)
+        bar = self.query_one("#overall", ProgressBar)
+        bar.update(total=max(items, 1), progress=done)
+
+    # ------------------------------------------------------------------ libraries
     def action_reload_libraries(self) -> None:
         self.load_libraries()
 
@@ -146,7 +277,7 @@ class LoudnessApp(App):
         try:
             rows = libraries(self.db)
         except SystemExit as exc:
-            self.call_from_thread(self.log_line, f"[red]Plex database: {exc}[/]")
+            self.call_from_thread(self.log_line, f"[#ff5f5f]plex database: {exc}[/]")
             return
         self.call_from_thread(self.show_libraries, rows)
 
@@ -154,14 +285,19 @@ class LoudnessApp(App):
         widget = self.query_one("#libs", SelectionList)
         chosen = set(widget.selected)
         widget.clear_options()
+        self.library_rows = rows
         self.library_names = {row["id"]: row["name"] for row in rows}
         for row in rows:
             pct = 100 * row["done"] / row["items"] if row["items"] else 0
-            label = f"{row['name'][:22]:<22} {row['done']:>5}/{row['items']:<5} {pct:3.0f}%"
+            label = Text.assemble((f"{row['name'][:22]:<22} ", "#e0e0e0"),
+                                  (f"{row['done']:>6,}/{row['items']:<6,}", "grey62"),
+                                  (f" {pct:3.0f}%", f"bold {MINT}" if pct >= 99.5 else f"bold {CYAN}"))
             widget.add_option((label, row["id"], row["id"] in chosen))
-        self.log_line(f"{len(rows)} video libraries loaded")
+        self.update_overview()
+        self.update_subtitle()
+        self.log_line(f"{len(rows)} video libraries  ·  {self.db.describe()}")
 
-    # ---- filter / preview / queue
+    # ------------------------------------------------------------------ filter / preview / queue
     def current_filter(self) -> Filter:
         value = lambda wid: self.query_one(f"#{wid}", Input).value
         year_from, year_to = parse_years(value("year"))
@@ -175,27 +311,36 @@ class LoudnessApp(App):
         pressed = self.query_one("#mode", RadioSet).pressed_button
         return QUICK if pressed is not None and pressed.id == "mode-quick" else FULL
 
+    def show_preview(self, text: str) -> None:
+        self.query_one("#preview", Static).update(Text.from_markup(text))
+
     def action_preview(self) -> None:
         try:
             self.run_preview(self.current_filter(), self.current_mode())
         except ValueError as exc:
-            self.query_one("#preview", Static).update(f"[red]{exc}[/]")
+            self.show_preview(f"[#ff5f5f]{exc}[/]")
 
     @work(thread=True, exclusive=True, group="preview")
     def run_preview(self, flt: Filter, mode) -> None:
-        self.call_from_thread(self.query_one("#preview", Static).update, "Counting...")
+        self.call_from_thread(self.show_preview, "[grey62]counting…[/]")
         size = preview(self.db, flt)
         rate = sum(w.get("rate", 0) for w in self.queue.workers() if w["alive"])
-        eta = f", about {human(size['hours'] * 3600 / rate)} at the current {rate:.0f}x" if rate else ""
-        text = (f"{size['files']:,} files, {size['tracks']:,} audio tracks, {size['hours']:,.0f} h of audio{eta}\n"
-                f"[dim]{flt.describe()}; mode {mode.name}[/]")
-        self.call_from_thread(self.query_one("#preview", Static).update, text)
+        eta = f"\n[grey62]about[/] [bold]{human(size['hours'] * 3600 / rate)}[/] [grey62]at {rate:.0f}×[/]" if rate else ""
+        text = (f"[bold {PINK}]{size['files']:,}[/] files  ·  [bold {CYAN}]{size['tracks']:,}[/] tracks  ·  "
+                f"[bold]{size['hours']:,.0f} h[/] audio{eta}\n[grey50]{flt.describe()} · {mode.name}[/]")
+        self.call_from_thread(self.show_preview, text)
+
+    def action_queue(self) -> None:
+        self.queue_batch()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.action_preview()
 
     def queue_batch(self) -> None:
         try:
             flt, mode = self.current_filter(), self.current_mode()
         except ValueError as exc:
-            self.query_one("#preview", Static).update(f"[red]{exc}[/]")
+            self.show_preview(f"[#ff5f5f]{exc}[/]")
             return
         self.create_batch(flt, mode)
 
@@ -204,31 +349,40 @@ class LoudnessApp(App):
         jobs = select_jobs(self.db, flt)
         tracks = sum(len(j["streams"]) for j in jobs)
         if not tracks:
-            self.call_from_thread(self.log_line, "Nothing matches that filter")
+            self.call_from_thread(self.log_line, "[yellow]nothing matches that filter[/]")
             return
         name = ", ".join(self.library_names.get(s, str(s)) for s in flt.sections) or "all libraries"
         batch = self.queue.create(name, jobs, mode.as_dict(), flt.describe(), created_by=os.uname().nodename)
-        self.call_from_thread(self.log_line, f"Queued [b]{batch.id}[/]: {len(jobs)} files, {tracks} tracks ({mode.name})")
+        self.call_from_thread(self.log_line, f"queued [bold {PINK}]{batch.id}[/]  ·  {len(jobs):,} files  ·  "
+                                             f"{tracks:,} tracks  ·  {mode.name}")
         self.call_from_thread(self.action_refresh)
 
-    # ---- batches / workers
+    # ------------------------------------------------------------------ batches / workers
     def action_refresh(self) -> None:
         self.load_queue()
 
     @work(thread=True, exclusive=True, group="refresh")
     def load_queue(self) -> None:
-        summaries = [b.summary() for b in self.queue.batches()[-30:]]
+        summaries = [b.summary() for b in self.queue.batches()[-40:]]
         workers = self.queue.workers()
         self.call_from_thread(self.show_queue, summaries, workers)
 
     def show_queue(self, summaries: list[dict], workers: list[dict]) -> None:
+        self.summaries, self.worker_rows = summaries, workers
         table = self.query_one("#batches", DataTable)
         keep = self.selected_batch
         table.clear()
-        for s in reversed(summaries):
-            table.add_row(s["id"], s["mode"], s["state"], s["tracks"], s["ok"], s["failed"], s["running"],
-                          f"{s['hours_done']:.0f}/{s['hours']:.0f}", s["filter"][:40], key=s["id"])
-        ids = [s["id"] for s in reversed(summaries)]
+        ordered = list(reversed(summaries))
+        for s in ordered:
+            done = s["ok"] + s["failed"]
+            table.add_row(Text(s["id"], style="#e0e0e0"), Text(s["mode"], style="grey62"),
+                          Text(s["state"], style=STATE_STYLE.get(s["state"], "")),
+                          f"{s['tracks']:,}", Text(f"{s['ok']:,}", style=MINT if done else ""),
+                          Text(f"{s['failed']:,}", style="#ff5f5f" if s["failed"] else "grey50"),
+                          Text(str(s["running"]), style=CYAN if s["running"] else "grey50"),
+                          f"{s['hours_done']:,.0f}/{s['hours']:,.0f}", Text(s["filter"][:44], style="grey62"),
+                          key=s["id"])
+        ids = [s["id"] for s in ordered]
         if keep in ids:
             table.move_cursor(row=ids.index(keep))
         active = self.query_one("#active", DataTable)
@@ -236,30 +390,37 @@ class LoudnessApp(App):
         lines = []
         for w in workers:
             busy = len(w.get("active", [])) if w["alive"] else 0
-            state = "[green]alive[/]" if w["alive"] else f"[red]silent {human(time.time() - w['updated'])}[/]"
-            lines.append(f"{w['name']}: {state}, {busy}/{w.get('slots', '?')} busy, {w.get('ok', 0)} ok, "
-                         f"{w.get('failed', 0)} failed, {w.get('rate', 0):.0f}x real time")
+            state = f"[bold {MINT}]alive[/]" if w["alive"] else f"[#ff5f5f]silent {human(time.time() - w['updated'])}[/]"
+            lines.append(f"[bold #e0e0e0]{w['name']}[/]  {state}  ·  {busy}/{w.get('slots', '?')} busy  ·  "
+                         f"[{MINT}]{w.get('ok', 0):,} ok[/]  ·  {w.get('failed', 0)} failed  ·  "
+                         f"{w.get('rate', 0):.0f}× real time  ·  v{w.get('version', '?')}")
             if not w["alive"]:
                 continue
             for a in w.get("active", []):
-                pct = f"{100 * a['position'] / a['total']:.0f}%" if a.get("total") else "?"
-                active.add_row(w["name"], human(time.time() - a["started"]), pct, f"{a.get('rss_mb', 0)} MB",
-                               a["title"][:60], a["codec"])
-        self.query_one("#workers", Static).update("\n".join(lines) or "[yellow]No workers have reported in yet[/]")
+                pct = 100 * a["position"] / a["total"] if a.get("total") else 0
+                active.add_row(Text(w["name"], style=CYAN), human(time.time() - a["started"]),
+                               Text(f"{pct:3.0f}%", style=f"bold {PINK}"), Text(f"{a.get('rss_mb', 0)} MB", style="grey62"),
+                               a["title"][:64], Text(a["codec"], style="grey62"))
+        self.query_one("#workers", Static).update(
+            Text.from_markup("\n".join(lines) or "[yellow]no workers have reported in yet[/]"))
+        self.query_one("#now-panel").border_subtitle = f"{active.row_count} running"
+        self.query_one("#batches-panel").border_subtitle = f"{len(summaries)} batches"
+        self.update_overview()
+        self.update_subtitle()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "batches" and event.row_key is not None:
             self.selected_batch = event.row_key.value
 
-    def require_batch(self):
+    def selected(self):
         if not self.selected_batch:
-            self.log_line("[yellow]Select a batch first[/]")
+            self.log_line("[yellow]select a batch first[/]")
             return None
         return self.queue.get(self.selected_batch)
 
-    # ---- actions on the selected batch
+    # ------------------------------------------------------------------ batch actions
     def action_import_batch(self) -> None:
-        batch = self.require_batch()
+        batch = self.selected()
         if batch:
             self.plan_batch_import(batch)
 
@@ -269,55 +430,65 @@ class LoudnessApp(App):
         if not plan.statements:
             self.call_from_thread(self.log_line, f"{batch.id}: nothing to import ({plan.describe()})")
             return
-        message = (f"Import {batch.id}?\n\n{plan.describe()}.\n\nThe Plex database is backed up first, "
-                   "then written in small transactions while Plex keeps running.")
+        message = (f"[bold]{batch.id}[/]\n\n{plan.describe()}.\n\n[grey62]The Plex database is backed up first, "
+                   "then written in small transactions while Plex keeps running.[/]")
 
         def answered(yes: bool) -> None:
             if yes:
                 self.run_import(batch, plan)
 
-        self.call_from_thread(self.push_screen, Confirm(message, yes=f"Import {plan.write}"), answered)
+        self.call_from_thread(self.push_screen, Confirm(message, yes=f"import {plan.write:,}", title="import into plex"),
+                              answered)
 
     @work(thread=True, exclusive=True, group="import")
     def run_import(self, batch, plan) -> None:
-        self.call_from_thread(self.log_line, f"Backing up and importing {plan.write} tracks...")
-        result = apply_import(self.db, plan, progress=lambda text: self.call_from_thread(self.log_line, text))
+        self.call_from_thread(self.log_line, f"backing up the database and importing {plan.write:,} tracks…")
+        result = apply_import(self.db, plan, progress=lambda text: self.call_from_thread(self.log_line, text.strip()))
         batch.mark_imported({"written": result["written"], "backup": result["backup"]})
-        colour = "green" if result["verified"] == result["written"] else "red"
-        self.call_from_thread(self.log_line, f"[{colour}]Imported {result['verified']}/{result['written']} tracks[/]"
-                                             f" (backup {result['backup']})")
+        colour = MINT if result["verified"] == result["written"] else "#ff5f5f"
+        self.call_from_thread(self.log_line, f"[bold {colour}]imported {result['verified']:,}/{result['written']:,} "
+                                             f"tracks[/]  [grey50]backup {result['backup']}[/]")
         self.call_from_thread(self.action_reload_libraries)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button = event.button.id
-        if button == "preview-btn":
-            self.action_preview()
-        elif button == "queue-btn":
-            self.queue_batch()
-        elif button == "import-btn":
-            self.action_import_batch()
-        elif button in ("retry-btn", "cancel-btn", "delete-btn"):
-            batch = self.require_batch()
-            if not batch:
-                return
-            if button == "retry-btn":
-                self.log_line(f"{batch.id}: {batch.retry_failed()} failed tracks queued again")
-            elif button == "cancel-btn":
-                if batch.cancelled:
-                    batch.resume()
-                    self.log_line(f"Resumed {batch.id}")
-                else:
-                    batch.cancel()
-                    self.log_line(f"Cancelled {batch.id} (running tracks finish)")
-            else:
-                def answered(yes: bool) -> None:
-                    if yes:
-                        self.queue.delete(batch)
-                        self.selected_batch = None
-                        self.log_line(f"Deleted {batch.id}")
-                        self.action_refresh()
-                self.push_screen(Confirm(f"Delete {batch.id} and its results?", yes="Delete"), answered)
+    def action_retry(self) -> None:
+        batch = self.selected()
+        if batch:
+            self.log_line(f"{batch.id}: {batch.retry_failed()} failed tracks queued again")
             self.action_refresh()
+
+    def action_cancel(self) -> None:
+        batch = self.selected()
+        if not batch:
+            return
+        if batch.cancelled:
+            batch.resume()
+            self.log_line(f"resumed {batch.id}")
+        else:
+            batch.cancel()
+            self.log_line(f"cancelled {batch.id} [grey50](running tracks finish)[/]")
+        self.action_refresh()
+
+    def action_delete(self) -> None:
+        batch = self.selected()
+        if not batch:
+            return
+
+        def answered(yes: bool) -> None:
+            if yes:
+                self.queue.delete(batch)
+                self.selected_batch = None
+                self.log_line(f"deleted {batch.id}")
+                self.action_refresh()
+
+        self.push_screen(Confirm(f"Delete [bold]{batch.id}[/] and its results?", yes="delete", title="delete batch"),
+                         answered)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {"preview-btn": self.action_preview, "queue-btn": self.queue_batch,
+                   "import-btn": self.action_import_batch, "retry-btn": self.action_retry,
+                   "cancel-btn": self.action_cancel, "delete-btn": self.action_delete}
+        if event.button.id in actions:
+            actions[event.button.id]()
 
 
 def run(config: Config) -> int:

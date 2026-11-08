@@ -1,5 +1,6 @@
 .git
 work
+no-media
 config.toml
 .env
 **/__pycache__

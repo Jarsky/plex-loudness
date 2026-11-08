@@ -30,7 +30,21 @@ def _write_json(path: Path, data) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with open(tmp, "w") as handle:
         json.dump(data, handle)
+    _shared(tmp, 0o666)
     os.replace(tmp, path)
+
+
+def _shared(path: Path, mode: int = 0o777) -> None:
+    """Controller and workers may run as different users: keep the shared folder writable for both."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def _mkdir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    _shared(path)
 
 
 def _read_json(path: Path, default=None):
@@ -87,9 +101,13 @@ class Batch:
 
     def add_result(self, worker: str, record: dict) -> None:
         folder = self.path / "results"
-        folder.mkdir(exist_ok=True)
-        with open(folder / f"{slug(worker)}.jsonl", "a") as handle:
+        _mkdir(folder)
+        file = folder / f"{slug(worker)}.jsonl"
+        new = not file.exists()
+        with open(file, "a") as handle:
             handle.write(json.dumps(record) + "\n")
+        if new:
+            _shared(file, 0o666)
 
     # ---- claims
     def _claim_path(self, stream_id: int) -> Path:
@@ -97,7 +115,7 @@ class Batch:
 
     def claim(self, stream_id: int, worker: str) -> bool:
         folder = self.path / "claims"
-        folder.mkdir(exist_ok=True)
+        _mkdir(folder)
         path = self._claim_path(stream_id)
         try:
             if time.time() - path.stat().st_mtime > STALE_SECONDS:
@@ -207,8 +225,8 @@ class Queue:
         self.workers_dir = self.work / "workers"
 
     def ensure(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.workers_dir.mkdir(parents=True, exist_ok=True)
+        _mkdir(self.root)
+        _mkdir(self.workers_dir)
 
     def batches(self) -> list[Batch]:
         if not self.root.is_dir():
@@ -230,9 +248,9 @@ class Queue:
         self.ensure()
         batch_id = f"{dt.datetime.now():%Y%m%d-%H%M%S}-{slug(name)}"
         path = self.root / batch_id
-        path.mkdir()
-        (path / "claims").mkdir()
-        (path / "results").mkdir()
+        _mkdir(path)
+        _mkdir(path / "claims")
+        _mkdir(path / "results")
         _write_json(path / "batch.json", {"id": batch_id, "name": name, "created": time.time(),
                                           "created_by": created_by, "mode": mode, "filter": description,
                                           "retry": 0, "jobs": jobs})

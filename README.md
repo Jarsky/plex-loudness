@@ -63,33 +63,52 @@ Samples miss the loudest moments, so sampled peaks are almost always too low. `i
 sampled results unless you pass `--allow-sampled`. Use `quick` for a fast first pass if you
 accept approximate values; use `full` for anything you keep.
 
-## Quick start (Docker)
+## Setup (Docker)
 
-1. **A shared folder** both sides can reach, e.g. a NAS share mounted on the Plex host.
-2. **Config**: `cp config.example.toml config.toml` and set `work_dir`, the `[plex]` section
-   (on the controller) and `[worker.path_map]` (on each worker — Plex paths → paths the worker
-   sees, under `/media` inside the container).
-3. **Worker** (next to the media):
-   ```bash
-   MEDIA_DIR=/mnt/user/media WORK_DIR=/mnt/user/share/plex-loudness PUID=99 PGID=100 \
-     docker compose -f docker/compose.worker.yml up -d
-   ```
-4. **Controller** (on the Plex host):
-   ```bash
-   WORK_DIR=/mnt/share/plex-loudness docker compose -f docker/compose.controller.yml run --rm controller
-   ```
-   or simply `./plex-loudness` (TUI) / `./plex-loudness status` — a wrapper that reads `docker/.env`.
-   Pick libraries, optionally a date-added window or release years, *Preview*, *Queue batch*.
-   Watch progress live; when a batch finishes, *Import into Plex*.
+One container, configured entirely in `.env` — the same idea as
+[media-health](https://github.com/Jarsky/media-health).
 
-Without Docker: `pip install '.[tui]'` (needs ffmpeg on workers), then `plex-loudness` and
-`plex-loudness-worker`. The CLI and worker need only the Python standard library; the TUI
-needs Textual.
+```bash
+git clone https://github.com/Jarsky/plex-loudness && cd plex-loudness
+cp .env.example .env        # set ROLE, WORK_PATH, MEDIA_PATH, PUID/PGID
+docker compose up -d --build
+docker exec -it plex-loudness plex-loudness     # the TUI   (or ./plex-loudness)
+```
+
+`ROLE` decides what the container does:
+
+| ROLE | Where | Needs |
+|---|---|---|
+| `both` | one machine with Plex and the media | `WORK_PATH`, `MEDIA_PATH`, docker socket |
+| `controller` | the machine running Plex | `WORK_PATH`, docker socket |
+| `worker` | next to the media (a NAS is ideal), any number of them | `WORK_PATH`, `MEDIA_PATH`, `PUID`/`PGID` |
+
+* **`WORK_PATH`** is the shared folder. Every controller and worker must point at the same
+  folder (e.g. a NAS share mounted on the Plex host).
+* The **docker socket** is added by `docker-compose.controller.yml`; `.env.example` already
+  sets `COMPOSE_FILE` for it. Remove that line on worker-only machines.
+* **Auto-detected:** the Plex container (the one that has Plex SQLite), the database owner, and
+  where Plex's folders (`/tv`, `/movies`, …) live under `MEDIA_PATH` — the worker checks real
+  files, then remembers the mapping. Override with `PLEX_CONTAINER`, `PLEX_USER`, `PATH_MAP`.
+* Without Docker: `pip install '.[tui]'` (workers need ffmpeg), then `plex-loudness` and
+  `plex-loudness-worker`; settings from the same environment variables or a `config.toml`
+  (see `config.example.toml`).
+
+## The TUI
+
+* **queue work** — pick libraries (with how much each already has), optionally a date-added
+  window and/or release years and a file limit, choose *full* or *quick*, **preview** (files,
+  tracks, hours, ETA at the current worker speed), **queue batch** (`a`).
+* **batches** — progress per batch; **import into plex** (`i`, shows what it will write and asks
+  first), **retry failed** (`t`), **cancel / resume** (`c`), **delete** (`d`).
+* **now measuring** — every track being measured on every worker: progress, memory.
+* **overview** — analysed vs total, queued, running, failed, ready to import, ETA.
 
 ## CLI
 
 ```bash
 plex-loudness status                                   # libraries, batches, workers
+# in Docker: docker exec plex-loudness plex-loudness <command>, or ./plex-loudness <command>
 plex-loudness libraries
 plex-loudness queue --library "TV Shows" --added-since 90d --dry-run
 plex-loudness queue --library Movies --year 1990-1999 --mode quick

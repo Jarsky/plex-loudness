@@ -1,0 +1,6 @@
+# Added for ROLE=controller or both (COMPOSE_FILE in .env): the controller reaches the Plex
+# container's database through the docker socket (`docker exec <plex> "Plex SQLite" ...`).
+services:
+  plex-loudness:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

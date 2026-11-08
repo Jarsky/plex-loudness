@@ -1,0 +1,29 @@
+# plex-loudness: one container. All settings live in .env (cp .env.example .env).
+#   docker compose up -d --build              # first time / after an update
+#   docker exec -it plex-loudness plex-loudness   # the TUI (ROLE=controller or both)
+#   docker logs -f plex-loudness               # worker progress
+services:
+  plex-loudness:
+    build: .
+    image: plex-loudness:local
+    container_name: plex-loudness
+    hostname: ${WORKER_NAME:-plex-loudness}   # how this worker is named in the TUI
+    restart: unless-stopped
+    network_mode: none            # it never needs the network
+    tty: true
+    stdin_open: true
+    stop_grace_period: 30s        # running tracks are handed back for another worker
+    cpus: ${CPUS:-8}
+    mem_limit: ${MEM_LIMIT:-6g}   # each ffmpeg uses about 150-400 MB
+    environment:
+      - ROLE=${ROLE:-worker}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Etc/UTC}
+      - WORKERS=${WORKERS:-0}
+      - PATH_MAP=${PATH_MAP:-}
+      - PLEX_CONTAINER=${PLEX_CONTAINER:-auto}
+      - PLEX_USER=${PLEX_USER:-auto}
+    volumes:
+      - ${WORK_PATH:?set WORK_PATH in .env}:/work
+      - ${MEDIA_PATH:-./no-media}:/media:ro

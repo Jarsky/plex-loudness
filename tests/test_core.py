@@ -111,3 +111,37 @@ def test_queue_claims_results_and_retry(tmp_path):
     assert [s["stream_id"] for _, s in batch.pending()] == [8]
     batch.cancel()
     assert batch.pending() == []
+
+
+def test_path_resolver_finds_plex_roots_under_media(tmp_path):
+    from plex_loudness.worker import PathResolver
+    media = tmp_path / "media"
+    (media / "tv_shows" / "Show" / "Season 1").mkdir(parents=True)
+    (media / "tv_shows" / "Show" / "Season 1" / "e1.mkv").write_text("x")
+    (media / "movies" / "Film (2001)").mkdir(parents=True)
+    (media / "movies" / "Film (2001)" / "f.mkv").write_text("x")
+    seen = []
+    resolver = PathResolver({}, str(media), log=seen.append)
+    assert resolver.resolve("/tv/Show/Season 1/e1.mkv") == str(media / "tv_shows/Show/Season 1/e1.mkv")
+    assert resolver.resolve("/movies/Film (2001)/f.mkv") == str(media / "movies/Film (2001)/f.mkv")
+    assert resolver.mapping["/tv"] == str(media / "tv_shows") and len(seen) == 2
+    # remembered: a file that doesn't exist yet still maps through the learned root
+    assert resolver.resolve("/tv/Other/x.mkv") == str(media / "tv_shows/Other/x.mkv")
+    assert resolver.resolve("/nowhere/a.mkv") == "/nowhere/a.mkv"
+
+
+def test_parse_path_map():
+    from plex_loudness.config import parse_path_map
+    assert parse_path_map("/tv=/media/tv_shows, /movies=/media/movies") == {"/tv": "/media/tv_shows",
+                                                                            "/movies": "/media/movies"}
+    assert parse_path_map("") == {}
+
+
+def test_env_overrides(monkeypatch):
+    from plex_loudness.config import load
+    monkeypatch.setenv("WORKERS", "12")
+    monkeypatch.setenv("PATH_MAP", "/tv=/media/tv")
+    monkeypatch.setenv("PLEX_CONTAINER", "myplex")
+    config = load()
+    assert config.worker.workers == 12 and config.worker.path_map == {"/tv": "/media/tv"}
+    assert config.plex.container == "myplex"

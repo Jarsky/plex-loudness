@@ -28,13 +28,57 @@ def sql_ids(ids) -> str:
     return ",".join(str(int(i)) for i in ids) or "NULL"
 
 
+def _docker(*args: str) -> str:
+    try:
+        proc = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise PlexDBError("The docker CLI isn't available here. The controller needs it (or the docker socket"
+                          " mounted into its container) to reach the Plex container.") from None
+    if proc.returncode != 0:
+        raise PlexDBError(f"docker {' '.join(args[:2])} failed: {proc.stderr.strip()[:300]}")
+    return proc.stdout.strip()
+
+
 class PlexDB:
     def __init__(self, config: PlexConfig):
         self.config = config
+        self.container = config.container
+        self.user = config.user
+
+    def detect(self) -> None:
+        """Resolve 'auto' container and user (docker backend)."""
+        if self.config.backend != "docker":
+            return
+        if self.container in ("", "auto"):
+            rows = [line.split("\t") for line in _docker("ps", "--format", "{{.Names}}\t{{.Image}}").splitlines()]
+            maybe = sorted({name for name, image in rows
+                            if any(word in (name + image).lower() for word in ("plex", "pms"))
+                            and "loudness" not in image.lower()},
+                           key=lambda n: (n.lower() != "plex", n))
+            # other Plex-related apps match by name too; the real server is the one with Plex SQLite
+            found = [name for name in maybe if subprocess.run(
+                ["docker", "exec", name, "test", "-x", self.config.sqlite], capture_output=True).returncode == 0]
+            if not found:
+                raise PlexDBError("Couldn't find a running Plex container (one with Plex SQLite)."
+                                  " Set PLEX_CONTAINER to its name.")
+            self.container = found[0]
+        if self.user in ("", "auto"):
+            owner = _docker("exec", self.container, "stat", "-c", "%u:%g", self.config.database)
+            if not owner or ":" not in owner:
+                raise PlexDBError(f"No Plex database at {self.config.database} in container {self.container}."
+                                  " Set PLEX_DATABASE (and PLEX_SQLITE) if your install differs.")
+            self.user = owner
+
+    def describe(self) -> str:
+        if self.config.backend == "local":
+            return f"local {self.config.database}"
+        return f"container {self.container} as {self.user}"
 
     def _prefix(self) -> list[str]:
         if self.config.backend == "docker":
-            return ["docker", "exec", "-i", "-u", self.config.user, self.config.container]
+            if self.container in ("", "auto") or self.user in ("", "auto"):
+                self.detect()
+            return ["docker", "exec", "-i", "-u", self.user, self.container]
         if self.config.backend == "local":
             return []
         raise PlexDBError(f"Unknown plex.backend {self.config.backend!r} (use 'docker' or 'local')")

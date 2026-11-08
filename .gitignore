@@ -1,6 +1,7 @@
 config.toml
 .env
 work/
+no-media/
 __pycache__/
 *.egg-info/
 .pytest_cache/

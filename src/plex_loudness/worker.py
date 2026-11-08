@@ -27,6 +27,40 @@ def map_path(path: str, mapping: dict[str, str]) -> str:
     return path
 
 
+class PathResolver:
+    """Plex path -> path on this worker: explicit PATH_MAP first, else auto-detected.
+
+    Auto-detection takes the file's top folder as Plex sees it (e.g. /tv) and looks for the
+    folder under the media root (e.g. /media/tv_shows) where the same file really exists.
+    The answer is remembered per top folder, so only the first file of each root is probed."""
+
+    def __init__(self, mapping: dict[str, str], media_root: str = "/media", log=print):
+        self.mapping = dict(mapping)
+        self.media_root = media_root
+        self.log = log
+        self.lock = threading.Lock()
+
+    def resolve(self, path: str) -> str:
+        mapped = map_path(path, self.mapping)
+        if mapped != path or os.path.exists(path):
+            return mapped
+        root = "/" + path.lstrip("/").split("/", 1)[0]
+        rest = path[len(root):]
+        with self.lock:
+            if root in self.mapping:
+                return map_path(path, self.mapping)
+            try:
+                folders = sorted(os.path.join(self.media_root, d) for d in os.listdir(self.media_root))
+            except OSError:
+                folders = []
+            for folder in [self.media_root] + folders:
+                if os.path.exists(folder + rest):
+                    self.mapping[root] = folder
+                    self.log(f"auto path map: {root} -> {folder}")
+                    return folder + rest
+        return path
+
+
 class Worker:
     def __init__(self, config: Config, slots: int, only_batch: str | None = None, once: bool = False):
         self.config, self.slots, self.once = config, slots, once
@@ -38,6 +72,8 @@ class Worker:
         self.active: dict[tuple[str, int], dict] = {}
         self.stats = {"ok": 0, "failed": 0, "measured_s": 0.0, "audio_s": 0.0}
         self.started = time.time()
+        self.paths = PathResolver(config.worker.path_map, config.worker.media_root,
+                                  log=lambda text: print(f"{time.strftime('%H:%M:%S')} {text}", flush=True))
 
     # ---- status
     def status(self) -> dict:
@@ -61,7 +97,7 @@ class Worker:
     # ---- work
     def measure(self, batch: Batch, job: dict, stream: dict, mode: Mode, retry: int) -> None:
         key = (batch.id, stream["stream_id"])
-        path = map_path(job["file"], self.config.worker.path_map)
+        path = self.paths.resolve(job["file"])
         duration = (job.get("duration_ms") or 0) / 1000
         info = {"batch": batch.id, "batch_path": str(batch.path), "stream_id": stream["stream_id"],
                 "title": job["title"], "codec": stream["codec"], "started": time.time(),
@@ -76,7 +112,8 @@ class Worker:
             if not os.path.exists(path):
                 record = {"stream_id": stream["stream_id"], "index": stream["index"], "codec": stream["codec"],
                           "mode": mode.name, "seconds": 0, "status": "failed",
-                          "error": f"file not found on worker {self.name}: {path} (check [worker.path_map])"}
+                          "error": f"file not found on worker {self.name}: {path} (mount the media at "
+                                   f"{self.config.worker.media_root}, or set PATH_MAP)"}
             else:
                 timeout = duration * self.config.worker.timeout_factor + self.config.worker.timeout_base
                 record = measure_track(path, stream, duration, mode, timeout, progress, self.stop)
@@ -121,7 +158,8 @@ class Worker:
     def run(self) -> int:
         self.queue.ensure()
         print(f"plex-loudness-worker {__version__} '{self.name}': {self.slots} parallel tracks, "
-              f"work dir {self.config.work_dir}, path map {self.config.worker.path_map or 'none'}", flush=True)
+              f"work dir {self.config.work_dir}, media {self.config.worker.media_root}, "
+              f"path map {self.config.worker.path_map or 'auto'}", flush=True)
         threading.Thread(target=self.heartbeat, daemon=True).start()
         self.queue.write_worker(self.name, self.status())
         futures: set[concurrent.futures.Future] = set()

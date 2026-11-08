@@ -1,7 +1,19 @@
-"""Configuration: one TOML file shared by the controller and the workers.
+"""Configuration, from environment variables (the Docker way) and/or an optional TOML file.
 
-Search order: --config, $PLEX_LOUDNESS_CONFIG, ./config.toml,
-~/.config/plex-loudness/config.toml, /config/config.toml.
+Environment variables win over the file. In Docker everything is normally set in `.env`:
+
+    ROLE            controller | worker | both                      (entrypoint only)
+    WORKERS         parallel tracks on this worker (0 = CPU count - 2)
+    WORKER_NAME     shown in the controller (default: hostname)
+    PATH_MAP        optional: "/tv=/media/tv_shows,/movies=/media/movies" (default: auto-detect)
+    PLEX_CONTAINER  Plex container name (default: auto-detect)
+    PLEX_USER       user that owns the Plex database (default: auto-detect)
+    PLEX_BACKEND    docker | local
+    PLEX_DATABASE, PLEX_SQLITE, BACKUP_DIR   only if your Plex install differs from the usual
+    WORK_DIR        the shared folder (in Docker always /work)
+
+Optional file: --config, $PLEX_LOUDNESS_CONFIG, ./config.toml, ~/.config/plex-loudness/config.toml,
+/config/config.toml (see config.example.toml).
 """
 
 from __future__ import annotations
@@ -21,29 +33,30 @@ SEARCH_PATHS = ["config.toml", "~/.config/plex-loudness/config.toml", "/config/c
 @dataclass
 class PlexConfig:
     backend: str = "docker"          # "docker": run Plex SQLite inside the Plex container; "local": run it here
-    container: str = "plex"          # docker backend: Plex container name
-    user: str = "abc"                # docker backend: user that owns the database inside the container
-    sqlite: str = DEFAULT_SQLITE     # path to Plex SQLite (inside the container for the docker backend)
-    database: str = DEFAULT_DATABASE  # library database path (inside the container for the docker backend)
-    backup_dir: str = ""             # where backups go (same filesystem view as `database`); default: next to it
+    container: str = "auto"          # docker backend: Plex container name, or auto-detect
+    user: str = "auto"               # docker backend: database owner inside the container, or auto-detect
+    sqlite: str = DEFAULT_SQLITE
+    database: str = DEFAULT_DATABASE
+    backup_dir: str = ""             # default: next to the database
 
 
 @dataclass
 class WorkerConfig:
-    name: str = ""                   # shown in the TUI; default: hostname
-    workers: int = 0                 # parallel ffmpeg processes; 0 = CPU count - 2
-    poll_seconds: float = 30         # how often an idle worker looks for new batches
+    name: str = ""                   # default: hostname
+    workers: int = 0                 # 0 = CPU count - 2
+    poll_seconds: float = 30
     timeout_factor: float = 1.5      # per-track timeout = duration * factor + timeout_base
     timeout_base: float = 1800
+    media_root: str = "/media"       # where auto path detection looks
     path_map: dict[str, str] = field(default_factory=dict)  # Plex path prefix -> path on this worker
 
 
 @dataclass
 class Config:
-    work_dir: str = "work"           # the shared folder (controller and workers must both see it)
+    work_dir: str = "work"
     plex: PlexConfig = field(default_factory=PlexConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
-    source: str = ""                 # file this was loaded from ("" = defaults)
+    source: str = ""
 
     @property
     def batches_dir(self) -> Path:
@@ -58,6 +71,17 @@ class Config:
         return self.worker.workers or max(1, (os.cpu_count() or 2) - 2)
 
 
+def parse_path_map(text: str) -> dict[str, str]:
+    """'/tv=/media/tv_shows, /movies=/media/movies' -> dict."""
+    out = {}
+    for pair in (text or "").replace(";", ",").split(","):
+        if "=" in pair:
+            src, dst = pair.split("=", 1)
+            if src.strip() and dst.strip():
+                out[src.strip()] = dst.strip()
+    return out
+
+
 def _apply(target, values: dict, section: str) -> None:
     for key, value in values.items():
         if not hasattr(target, key):
@@ -65,10 +89,24 @@ def _apply(target, values: dict, section: str) -> None:
         setattr(target, key, value)
 
 
+ENV = {  # variable -> (section, attribute, type)
+    "WORK_DIR": (None, "work_dir", str),
+    "PLEX_BACKEND": ("plex", "backend", str),
+    "PLEX_CONTAINER": ("plex", "container", str),
+    "PLEX_USER": ("plex", "user", str),
+    "PLEX_SQLITE": ("plex", "sqlite", str),
+    "PLEX_DATABASE": ("plex", "database", str),
+    "BACKUP_DIR": ("plex", "backup_dir", str),
+    "WORKERS": ("worker", "workers", int),
+    "WORKER_NAME": ("worker", "name", str),
+    "POLL_SECONDS": ("worker", "poll_seconds", float),
+    "MEDIA_ROOT": ("worker", "media_root", str),
+}
+
+
 def load(path: str | None = None) -> Config:
-    """Load the config file (if any) and apply environment overrides."""
-    candidates = [path] if path else [os.environ.get("PLEX_LOUDNESS_CONFIG", "")] + SEARCH_PATHS
     config = Config()
+    candidates = [path] if path else [os.environ.get("PLEX_LOUDNESS_CONFIG", "")] + SEARCH_PATHS
     for candidate in candidates:
         if not candidate:
             continue
@@ -86,10 +124,12 @@ def load(path: str | None = None) -> Config:
             break
         if path:
             raise SystemExit(f"Config file not found: {path}")
-    if os.environ.get("PLEX_LOUDNESS_WORK"):
-        config.work_dir = os.environ["PLEX_LOUDNESS_WORK"]
-    if os.environ.get("PLEX_LOUDNESS_WORKERS"):
-        config.worker.workers = int(os.environ["PLEX_LOUDNESS_WORKERS"])
-    if os.environ.get("PLEX_LOUDNESS_WORKER_NAME"):
-        config.worker.name = os.environ["PLEX_LOUDNESS_WORKER_NAME"]
+    for var, (section, attr, kind) in ENV.items():
+        value = os.environ.get(var) or os.environ.get(f"PLEX_LOUDNESS_{var}")
+        if value:
+            setattr(getattr(config, section) if section else config, attr, kind(value))
+    if os.environ.get("PATH_MAP"):
+        config.worker.path_map = parse_path_map(os.environ["PATH_MAP"])
+    if not config.source and any(os.environ.get(v) for v in ENV):
+        config.source = "environment"
     return config

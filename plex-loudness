@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run the controller from the Docker image: ./plex-loudness [command ...]   (no command = TUI)
+# Settings come from docker/.env (WORK_DIR, CONFIG, TZ).
+cd "$(dirname "$0")/docker" || exit 1
+if [ $# -eq 0 ]; then
+  exec docker compose -f compose.controller.yml run --rm controller plex-loudness tui
+elif [ -t 0 ] && [ -t 1 ]; then
+  exec docker compose -f compose.controller.yml run --rm controller plex-loudness "$@"
+else
+  exec docker compose -f compose.controller.yml run --rm -T controller plex-loudness "$@" </dev/null
+fi

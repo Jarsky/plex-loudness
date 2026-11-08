@@ -1,0 +1,29 @@
+# plex-loudness configuration. Copy to config.toml and adjust.
+# The controller and every worker read the same format; each only uses the parts it needs.
+
+# The shared folder. The controller and all workers must see the SAME folder
+# (a network share, or a local folder if everything runs on one machine).
+work_dir = "/work"
+
+[plex]
+# How the controller reaches the Plex database (workers never touch it).
+#   "docker": run Plex SQLite inside the Plex container with `docker exec` (needs the docker CLI/socket)
+#   "local":  run Plex SQLite on this machine (Plex installed natively)
+backend = "docker"
+container = "plex"            # docker backend: Plex container name
+user = "abc"                  # docker backend: user owning the database (linuxserver images: abc; official: plex)
+sqlite = "/usr/lib/plexmediaserver/Plex SQLite"
+database = "/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+# backup_dir = ""             # defaults to the database's own folder (paths as Plex SQLite sees them)
+
+[worker]
+# name = "nas"                # shown in the controller; default: hostname
+workers = 0                   # parallel ffmpeg processes (one per audio track); 0 = CPU count - 2
+poll_seconds = 30             # how often an idle worker checks for new batches
+timeout_factor = 1.5          # per-track timeout = duration x factor + timeout_base seconds
+timeout_base = 1800
+
+# Plex stores file paths as Plex sees them. Map them to where THIS worker sees the media.
+[worker.path_map]
+"/movies" = "/media/movies"
+"/tv" = "/media/tv"

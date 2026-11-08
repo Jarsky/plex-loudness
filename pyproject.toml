@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plex-loudness"
+version = "2.0.0"
+description = "Fill in Plex's video loudness data with ffmpeg, in parallel, outside Plex"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Jarsky" }]
+keywords = ["plex", "loudness", "ffmpeg", "loudnorm", "normalization"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+dependencies = []                      # the CLI and worker are standard library only
+
+[project.optional-dependencies]
+tui = ["textual>=1.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+plex-loudness = "plex_loudness.cli:main"
+plex-loudness-worker = "plex_loudness.worker:main"
+
+[project.urls]
+Homepage = "https://github.com/Jarsky/plex-loudness"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

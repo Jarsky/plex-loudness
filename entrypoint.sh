@@ -6,7 +6,7 @@ if [ "$1" != "serve" ]; then
 fi
 role="${ROLE:-worker}"
 uid="${PUID:-1000}"; gid="${PGID:-1000}"
-name="plex-loudness"   # container_name in docker-compose.yml
+name="plex-loudness"   # the controller's container_name in docker-compose.yml
 case "$role" in
     worker|both)
         [ "$role" = "both" ] && echo "plex-loudness: controller ready -> docker exec -it $name plex-loudness"
@@ -17,7 +17,7 @@ case "$role" in
         echo "  open the TUI:   docker exec -it $name plex-loudness"
         echo "  or a command:   docker exec $name plex-loudness status"
         if ! docker version >/dev/null 2>&1; then
-            echo "  WARNING: no docker socket - add docker-compose.controller.yml (COMPOSE_FILE in .env)"
+            echo "  WARNING: no docker socket - the controller needs /var/run/docker.sock mounted to reach Plex"
         fi
         exec sleep infinity
         ;;

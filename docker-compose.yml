@@ -1,29 +1,55 @@
-# plex-loudness: one container. All settings live in .env (cp .env.example .env).
-#   docker compose up -d --build              # first time / after an update
-#   docker exec -it plex-loudness plex-loudness   # the TUI (ROLE=controller or both)
-#   docker logs -f plex-loudness               # worker progress
+# plex-loudness: a controller and/or a worker per machine, picked with COMPOSE_PROFILES in .env
+#   COMPOSE_PROFILES=controller          the machine running Plex          -> container plex-loudness
+#   COMPOSE_PROFILES=worker              wherever the CPU and media are     -> container plex-loudness-worker
+#   COMPOSE_PROFILES=controller,worker   one machine doing both
+#
+#   docker compose up -d --build                     # first time / after an update
+#   docker exec -it plex-loudness plex-loudness      # the TUI (on the controller)
+#   docker logs -f plex-loudness-worker              # worker progress
+x-common: &common
+  build: .
+  image: plex-loudness:local
+  restart: unless-stopped
+  network_mode: none            # neither ever needs the network
+
 services:
-  plex-loudness:
-    build: .
-    image: plex-loudness:local
+  plex-loudness:                # the controller: TUI, queueing, importing into Plex
+    <<: *common
+    profiles: [controller]
     container_name: plex-loudness
-    hostname: ${WORKER_NAME:-plex-loudness}   # how this worker is named in the TUI
-    restart: unless-stopped
-    network_mode: none            # it never needs the network
     tty: true
     stdin_open: true
-    stop_grace_period: 30s        # running tracks are handed back for another worker
+    environment:
+      ROLE: controller
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      PLEX_CONTAINER: ${PLEX_CONTAINER:-auto}
+      PLEX_USER: ${PLEX_USER:-auto}
+    volumes:
+      - ${WORK_PATH:?set WORK_PATH in .env}:/work           # the shared folder
+      - /var/run/docker.sock:/var/run/docker.sock           # reaches the Plex container's database
+    cpus: 1
+    mem_limit: 1g
+
+  plex-loudness-worker:         # a worker: measures queued audio tracks with ffmpeg
+    <<: *common
+    profiles: [worker]
+    container_name: plex-loudness-worker
+    hostname: ${WORKER_NAME:-plex-loudness-worker}   # its name in the TUI: set it to the machine's name
+    stop_grace_period: 30s      # running tracks are handed back for another worker
+    environment:
+      ROLE: worker
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      WORKERS: ${WORKERS:-0}
+      WORKER_NAME: ${WORKER_NAME:-}
+      PATH_MAP: ${PATH_MAP:-}
+      STALL_SECONDS: ${STALL_SECONDS:-900}
+      TIMEOUT_FACTOR: ${TIMEOUT_FACTOR:-4}
+    volumes:
+      - ${WORK_PATH:?set WORK_PATH in .env}:/work           # the same shared folder as the controller
+      - ${MEDIA_PATH:-./no-media}:/media:ro                # your media, read-only (set MEDIA_PATH in .env)
     cpus: ${CPUS:-8}
     mem_limit: ${MEM_LIMIT:-6g}   # each ffmpeg uses about 150-400 MB
-    environment:
-      - ROLE=${ROLE:-worker}
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
-      - TZ=${TZ:-Etc/UTC}
-      - WORKERS=${WORKERS:-0}
-      - PATH_MAP=${PATH_MAP:-}
-      - PLEX_CONTAINER=${PLEX_CONTAINER:-auto}
-      - PLEX_USER=${PLEX_USER:-auto}
-    volumes:
-      - ${WORK_PATH:-./work}:/work   # the shared folder (see .env)
-      - ${MEDIA_PATH:-./no-media}:/media:ro

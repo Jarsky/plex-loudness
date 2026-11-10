@@ -1,4 +1,5 @@
-# plex-loudness: one image, three roles (ROLE=controller | worker | both). See docker-compose.yml.
+# plex-loudness: one image for the controller and the worker (ROLE=controller | worker | both).
+# docker-compose.yml runs it as plex-loudness (controller) and/or plex-loudness-worker.
 FROM python:3.13-alpine
 
 RUN apk add --no-cache ffmpeg docker-cli tini su-exec tzdata

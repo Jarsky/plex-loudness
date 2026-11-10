@@ -69,7 +69,7 @@ def demo_work_dir(root: Path) -> None:
     mv.mark_imported({"written": 925, "backup": "(demo)"})
     time.sleep(1.1)
     tv_jobs = [job(i, True) for i in range(4212)]
-    tv = queue.create("TV Shows", tv_jobs, FULL.as_dict(), "added since 2025-11-08", "demo")
+    tv = queue.create("TV Shows", tv_jobs, FULL.as_dict(), "added or replaced since 2025-11-08", "demo")
     for n, j in enumerate(tv_jobs[:1874]):
         rec = ok(j["streams"][0], j, rng)
         if n in (77, 640, 1501):
@@ -93,10 +93,20 @@ def demo_work_dir(root: Path) -> None:
                                   "position": 0, "total": 2640, "rss_mb": rng.randint(140, 260)})
     for a in active["nas"] + active["desktop"]:
         a["position"] = min(a["total"] * 0.98, (time.time() - a["started"]) * rng.uniform(1.5, 5))
+    for a in active["desktop"]:
+        a["paused"] = True                      # the desktop is paused: its tracks are frozen, not lost
     queue.write_worker("nas", {"version": __version__, "slots": 20, "active": active["nas"], "ok": 1247, "failed": 2,
-                               "audio_hours": 914.0, "rate": 52, "started": time.time() - 64_000})
+                               "audio_hours": 914.0, "rate": 52, "started": time.time() - 64_000,
+                               "resources": {"cpu_cores": 18.7, "cpu_limit": 20, "mem_mb": 4710, "mem_limit_mb": 6144,
+                                             "host_cpu_pct": 71, "host_load": 22.4, "host_cpus": 32,
+                                             "host_mem_mb": 41_000, "host_mem_total_mb": 64_000}})
     queue.write_worker("desktop", {"version": __version__, "slots": 16, "active": active["desktop"], "ok": 627,
-                                   "failed": 1, "audio_hours": 460.0, "rate": 41, "started": time.time() - 40_000})
+                                   "failed": 1, "audio_hours": 460.0, "rate": 41, "started": time.time() - 40_000,
+                                   "paused": True,
+                                   "resources": {"cpu_cores": 0.0, "cpu_limit": 14, "mem_mb": 3120, "mem_limit_mb": 8192,
+                                                 "host_cpu_pct": 12, "host_load": 2.1, "host_cpus": 24,
+                                                 "host_mem_mb": 14_500, "host_mem_total_mb": 32_000}})
+    queue.pause_worker("desktop")
 
 
 def patch_tui() -> None:

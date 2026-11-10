@@ -5,6 +5,8 @@ Environment variables win over the file. In Docker everything is normally set in
     ROLE            controller | worker | both                      (entrypoint only)
     WORKERS         parallel tracks on this worker (0 = CPU count - 2)
     WORKER_NAME     shown in the controller (default: hostname)
+    STALL_SECONDS   kill a track whose ffmpeg makes no progress for this long (default 900)
+    TIMEOUT_FACTOR  hard limit per track = duration x factor + 30 min (default 4)
     PATH_MAP        optional: "/tv=/media/tv_shows,/movies=/media/movies" (default: auto-detect)
     PLEX_CONTAINER  Plex container name (default: auto-detect)
     PLEX_USER       user that owns the Plex database (default: auto-detect)
@@ -45,8 +47,12 @@ class WorkerConfig:
     name: str = ""                   # default: hostname
     workers: int = 0                 # 0 = CPU count - 2
     poll_seconds: float = 30
-    timeout_factor: float = 1.5      # per-track timeout = duration * factor + timeout_base
+    # A track is killed if ffmpeg makes no progress for stall_seconds (stuck or runaway), or runs past
+    # duration * timeout_factor + timeout_base. The factor is generous because a busy host can run well
+    # under real time (seen: 0.56x for TrueHD 7.1 with the NAS at 2x load) and that is slow, not broken.
+    timeout_factor: float = 4.0
     timeout_base: float = 1800
+    stall_seconds: float = 900
     media_root: str = "/media"       # where auto path detection looks
     path_map: dict[str, str] = field(default_factory=dict)  # Plex path prefix -> path on this worker
 
@@ -100,6 +106,8 @@ ENV = {  # variable -> (section, attribute, type)
     "WORKERS": ("worker", "workers", int),
     "WORKER_NAME": ("worker", "name", str),
     "POLL_SECONDS": ("worker", "poll_seconds", float),
+    "TIMEOUT_FACTOR": ("worker", "timeout_factor", float),
+    "STALL_SECONDS": ("worker", "stall_seconds", float),
     "MEDIA_ROOT": ("worker", "media_root", str),
 }
 

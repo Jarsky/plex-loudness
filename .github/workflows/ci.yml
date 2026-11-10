@@ -26,6 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Compose profiles render (controller, worker, both, SMB worker)
+        run: |
+          for p in controller worker controller,worker; do
+            COMPOSE_PROFILES=$p WORK_PATH=/tmp/w MEDIA_PATH=/tmp/m docker compose config -q
+          done
+          COMPOSE_PROFILES=worker WORK_PATH=. SMB_HOST=nas SMB_WORK=pl \
+            docker compose -f docker-compose.yml -f docker-compose.cifs.yml config -q
       - run: docker build -t plex-loudness:ci .
       - name: End to end - queue a generated clip, measure it with a worker
         run: |

@@ -10,12 +10,17 @@ from .plexdb import PlexDB, sql_ids
 
 MOVIE, EPISODE = 1, 4
 HAS_LOUDNESS = "ms.extra_data LIKE '%ln:loudness%'"
+# When the file behind a track arrived. metadata_items.added_at is when the movie or episode was
+# first added and doesn't move when Radarr/Sonarr replace the file, so an upgraded file would look
+# years old. Plex creates new media_streams rows for the new file, so their created_at is the
+# replacement date. (media_parts/media_items.created_at aren't filled in by current Plex.)
+ADDED = "MAX(md.added_at, COALESCE(ms.created_at, 0))"
 
 
 @dataclass
 class Filter:
     sections: list[int] = field(default_factory=list)  # library ids; empty = all video libraries
-    added_since: int | None = None                     # unix time
+    added_since: int | None = None                     # unix time; file added or replaced since
     added_before: int | None = None
     year_from: int | None = None
     year_to: int | None = None
@@ -27,9 +32,9 @@ class Filter:
     def describe(self) -> str:
         parts = []
         if self.added_since:
-            parts.append(f"added since {dt.date.fromtimestamp(self.added_since)}")
+            parts.append(f"added or replaced since {dt.date.fromtimestamp(self.added_since)}")
         if self.added_before:
-            parts.append(f"added before {dt.date.fromtimestamp(self.added_before)}")
+            parts.append(f"added or replaced before {dt.date.fromtimestamp(self.added_before)}")
         if self.year_from or self.year_to:
             parts.append(f"year {self.year_from or '…'}-{self.year_to or '…'}")
         if self.items:
@@ -113,9 +118,9 @@ def _where(flt: Filter) -> str:
     if flt.items:
         where.append(f"md.id IN ({sql_ids(flt.items)})")
     if flt.added_since:
-        where.append(f"md.added_at >= {int(flt.added_since)}")
+        where.append(f"{ADDED} >= {int(flt.added_since)}")
     if flt.added_before:
-        where.append(f"md.added_at < {int(flt.added_before)}")
+        where.append(f"{ADDED} < {int(flt.added_before)}")
     if flt.year_from:
         where.append(f"{year} >= {int(flt.year_from)}")
     if flt.year_to:
@@ -136,9 +141,9 @@ _FROM = """
 def preview(db: PlexDB, flt: Filter) -> dict:
     """How much work a filter selects: files, audio tracks, hours of audio."""
     rows = db.query(f"""
-        SELECT mp.id AS part, mei.duration AS duration, COUNT(*) AS tracks {_FROM}
+        SELECT mp.id AS part, mei.duration AS duration, COUNT(*) AS tracks, MAX({ADDED}) AS added {_FROM}
         WHERE {_where(flt)} GROUP BY mp.id
-        ORDER BY {'md.added_at DESC' if flt.newest_first else 'mp.file'}""")
+        ORDER BY {'added DESC' if flt.newest_first else 'mp.file'}""")
     if flt.limit:
         rows = rows[: flt.limit]
     return {"files": len(rows), "tracks": sum(r["tracks"] for r in rows),
@@ -150,11 +155,11 @@ def select_jobs(db: PlexDB, flt: Filter) -> list[dict]:
     rows = db.query(f"""
         SELECT ms.id AS stream_id, ms."index" AS idx, ms.codec, ms.channels, ms.language,
                mp.id AS part_id, mp.file, mp.size, mei.duration, md.id AS item_id, md.title,
-               md.added_at, COALESCE(md.year, gp.year) AS year, ls.name AS library,
+               {ADDED} AS added_at, COALESCE(md.year, gp.year) AS year, ls.name AS library,
                COALESCE(gp.title, '') AS show, p."index" AS season, md."index" AS episode
         {_FROM}
         WHERE {_where(flt)}
-        ORDER BY {'md.added_at DESC' if flt.newest_first else 'mp.file'}, mp.id, ms."index" """)
+        ORDER BY {'MAX(' + ADDED + ') OVER (PARTITION BY mp.id) DESC' if flt.newest_first else 'mp.file'}, mp.id, ms."index" """)
     parts: dict[int, dict] = {}
     for row in rows:
         if row["part_id"] not in parts:

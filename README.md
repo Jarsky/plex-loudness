@@ -80,33 +80,82 @@ Per audio stream, in `media_streams.extra_data`, measured with
 Music libraries use different fields (`ld:*`) and aren't handled here, since Plex's music
 analysis copes fine on its own.
 
-## Setup (Docker)
+## Deploying a controller and workers
 
-It's one container, configured with a `.env` file, in the same style as [media-health](https://github.com/Jarsky/media-health).
+There's one image and one `docker-compose.yml` with two services. Each machine runs whichever it
+needs, chosen with `COMPOSE_PROFILES` in its `.env`:
+
+| On this machine | `COMPOSE_PROFILES` | Container | Needs |
+|---|---|---|---|
+| the one running Plex | `controller` | `plex-loudness` | `WORK_PATH` (the docker socket is mounted for you) |
+| wherever there's CPU and the media (NAS, desktop, …) | `worker` | `plex-loudness-worker` | `WORK_PATH`, `MEDIA_PATH`, `PUID`/`PGID`, `WORKER_NAME` |
+| one machine doing everything | `controller,worker` | both | all of the above |
+
+Run as many workers as you like, one per machine. Give each its own `WORKER_NAME` (the machine's
+name is a good choice). That's how it shows up in the controller.
+
+### 1. Make the shared folder
+
+The controller and the workers never talk over the network. They share one folder, which holds the
+queued batches, each worker's results, and live status. **Every machine must reach the same folder**,
+usually a NAS share, and `WORK_PATH` is *that machine's own path* to it:
+
+```
+NAS (worker)                       Plex host (controller)                Desktop (worker)
+/mnt/user/plex-loudness   <=SMB/NFS=>  /mnt/nas/plex-loudness   <=SMB=>   //nas/plex-loudness
+WORK_PATH=/mnt/user/plex-loudness  WORK_PATH=/mnt/nas/plex-loudness     (SMB_WORK in .env, see below)
+```
+
+* Mount the share on the Plex host like any other (`/etc/fstab`, or your NAS's own mounts) **before**
+  starting the controller. Inside every container it is always `/work`.
+* **Permissions:** the controller and workers may run as different users. plex-loudness keeps every
+  file it creates group- and world-writable, so the only requirement is that each machine's
+  `PUID`/`PGID` can write to `WORK_PATH`. With SMB, mount it with `file_mode=0666,dir_mode=0777`
+  (or as a user that owns the share).
+* **Filesystem:** a local disk, NFSv4 or SMB 3 all work. Tracks are claimed by creating a file
+  atomically (`O_EXCL`), which these honour. Avoid NFSv3 without locking.
+* Check it: `touch` a file in `WORK_PATH` on one machine and see it appear on the others.
+
+### 2. The controller (on the Plex host)
 
 ```bash
 git clone https://github.com/Jarsky/plex-loudness && cd plex-loudness
-cp .env.example .env        # set ROLE, WORK_PATH, MEDIA_PATH, PUID/PGID
+cp .env.example .env
+#   COMPOSE_PROFILES=controller
+#   WORK_PATH=/mnt/nas/plex-loudness     # this host's path to the shared folder
 docker compose up -d --build
-docker exec -it plex-loudness plex-loudness     # the TUI   (or ./plex-loudness)
+docker exec -it plex-loudness plex-loudness      # the TUI   (or ./plex-loudness)
 ```
 
-`ROLE` decides what the container does:
+It finds the Plex container by itself (whichever container has Plex SQLite in it) and the user that
+owns the database. Override with `PLEX_CONTAINER` / `PLEX_USER` if needed. It needs no media.
 
-| ROLE | Where | Needs |
-|---|---|---|
-| `both` | one machine with Plex and the media | `WORK_PATH`, `MEDIA_PATH`, docker socket |
-| `controller` | the machine running Plex | `WORK_PATH`, docker socket |
-| `worker` | wherever the CPU is: NAS, desktop, … (any number) | `WORK_PATH`, `MEDIA_PATH`, `PUID`/`PGID` |
+### 3. A worker (next to the media)
 
-* **`WORK_PATH`** is the shared folder. The controller and every worker need to see the same
-  folder, for example a NAS share mounted on each machine.
-* The **docker socket** comes from `docker-compose.controller.yml`, and `.env.example` sets
-  `COMPOSE_FILE` to include it. Remove that line on worker-only machines.
-* **Auto-detected:** the Plex container (whichever one has Plex SQLite in it), the database owner,
-  and where Plex's folders (`/tv`, `/movies`, …) live under `MEDIA_PATH`. The worker finds a real
-  file, works out the mapping, and remembers it. You can override any of these with
-  `PLEX_CONTAINER`, `PLEX_USER` and `PATH_MAP`.
+```bash
+git clone https://github.com/Jarsky/plex-loudness && cd plex-loudness
+cp .env.example .env
+#   COMPOSE_PROFILES=worker
+#   WORK_PATH=/mnt/user/plex-loudness    # this machine's path to the SAME shared folder
+#   MEDIA_PATH=/mnt/user/media           # your media root on this machine
+#   PUID=99  PGID=100                    # can read the media and write WORK_PATH
+#   WORKER_NAME=nas  WORKERS=12  CPUS=12
+docker compose up -d --build
+docker logs -f plex-loudness-worker
+```
+
+Within a few seconds the worker appears in the controller's worker list.
+
+**Media paths.** Plex knows a file as e.g. `/movies/Alien (1979)/Alien.mkv`, a path *inside the Plex
+container*. The worker mounts `MEDIA_PATH` at `/media` and finds Plex's folders under it by itself:
+for the first file of each Plex root (`/movies`, `/tv`, …) it looks for the same file under `/media`
+and its subfolders (`/media/movies`, `/media/tv_shows`, …) and remembers the match. If your layout
+is unusual, set it explicitly: `PATH_MAP=/movies=/media/films,/tv=/media/tv_shows`.
+
+**How many tracks at once.** Each track is one single-threaded ffmpeg. `WORKERS` above the cores that
+are actually free doesn't help: on a busy host every track just runs slower, and slow enough tracks
+hit the timeout. The controller shows each host's load. If it says *overloaded*, lower `WORKERS`
+or pause that worker while the host is busy.
 
 ### A worker on your desktop
 
@@ -116,11 +165,12 @@ straight into the container using the SMB override:
 
 ```bash
 # .env on the desktop
-ROLE=worker
+COMPOSE_PROFILES=worker
 COMPOSE_FILE=docker-compose.yml:docker-compose.cifs.yml
+WORK_PATH=.                     # not used with the SMB override, but must be set
 SMB_HOST=nas.local
 SMB_MEDIA=media                 # the share holding your library (read-only)
-SMB_WORK=share/plex-loudness    # the shared folder the controller uses
+SMB_WORK=plex-loudness          # the shared folder the controller uses
 SMB_USER=me
 SMB_PASSWORD=secret
 WORKERS=14                      # leave a couple of threads for yourself
@@ -128,24 +178,64 @@ CPUS=14
 WORKER_NAME=desktop
 ```
 
-Run `docker compose up -d --build` and the desktop pops up in the controller's worker list within
-a few seconds. Stop it whenever you like with `docker compose stop`, and whatever it was working on
-gets handed back to the other workers.
+Run `docker compose up -d --build`. Need the CPU back for a while? **Pause** the desktop from the
+controller (`w` in the TUI, or `plex-loudness workers pause desktop`): its ffmpeg processes are
+frozen, not killed, and carry on from where they were when you resume. `docker compose stop` also
+works, but then the tracks it was on start again from the beginning on another worker.
 
 Not using Docker? `pip install .`, put ffmpeg on your PATH, then run `plex-loudness-worker` with
 `WORK_DIR`, `MEDIA_ROOT` (and `PATH_MAP` if needed) set as environment variables. This has only
 been tested on Linux so far.
 
+### Upgrading from 2.1 (one service with `ROLE`)
+
+In each `.env`, replace `ROLE=…` with `COMPOSE_PROFILES=controller` / `worker` (`both` becomes
+`controller,worker`) and delete the `COMPOSE_FILE=…docker-compose.controller.yml` line. Then
+`docker compose up -d --build`, and on worker machines remove the old container:
+`docker rm -f plex-loudness`. Workers are now called `plex-loudness-worker`.
+
 ## The TUI
 
-* **queue work**: pick libraries (it shows how much each one already has), optionally a
-  date-added window and/or release years and a file limit, choose *full* or *quick*, hit
-  **preview** (`p`) to see files, tracks, hours and an ETA at the current worker speed, then
-  **queue batch** (`a`).
+* **queue work**: pick libraries (it shows how much each one already has), optionally an
+  *added or replaced since/before* window and/or release years and a file limit, choose *full* or
+  *quick*, hit **preview** (`p`) to see files, tracks, hours and an ETA at the current worker speed,
+  then **queue batch** (`a`). A file counts as added when Radarr/Sonarr *replaced* it too: Plex keeps
+  the movie's original "added" date, but the new file's audio streams are new.
 * **batches**: progress of each batch. **Import into plex** (`i`) shows what it's about to write and
-  asks first. There's also **retry failed** (`t`), **cancel / resume** (`c`) and **delete** (`d`).
-* **now measuring**: every track being measured on every worker, with progress and memory.
+  asks first. Also **retry failed** (`t`), **pause / resume** (`s`), **cancel / resume** (`c`) and
+  **delete** (`d`).
+* **now measuring**: every track being measured on every worker, with progress and memory. Paused
+  tracks show ⏸.
+* **workers**: one row per worker: state, busy slots, **CPU** (cores in use / its limit), **memory**
+  (in use / its limit), and its **host's** CPU, load and memory, flagged *overloaded* when the host
+  has more work than cores. Select a worker and press `w` to pause or resume it.
 * **overview**: analysed vs total, queued, running, failed, ready to import, speed and ETA.
+
+### Pause, cancel, retry
+
+| | What happens to running tracks | New tracks |
+|---|---|---|
+| **pause** a batch (`s`) | frozen in place (no CPU), progress kept | none from that batch |
+| **pause** a worker (`w`) | that worker's tracks frozen in place | that worker takes none |
+| **resume** | carry on from where they were | yes |
+| **cancel** a batch (`c`) | finish normally | none from that batch |
+
+Pausing freezes ffmpeg (SIGSTOP/SIGCONT), so a two-hour track paused at 90% still only has 10% left
+when resumed, and paused time doesn't count towards its timeout. Paused tracks stay claimed by
+their worker. If that worker is stopped altogether, they go back to the queue after 10 minutes.
+
+**Retry failed** (`t`, or `plex-loudness batches retry <batch>`) queues only the batch's *failed
+tracks* again. Tracks that succeeded, and the other tracks of the same file, aren't measured again.
+A retried track is measured from its start, since a killed ffmpeg run can't be continued. The error
+says why each one failed: `plex-loudness batches show <batch>`.
+
+### Timeouts
+
+A track is stopped if its ffmpeg makes **no progress for 15 minutes** (`STALL_SECONDS`), which
+catches a stuck or runaway process, or runs past **4 × its duration + 30 minutes**
+(`TIMEOUT_FACTOR`). A busy host can run well under real time: true-peak measurement of a TrueHD 7.1
+track at 0.5× on a NAS at twice its core count is slow, not broken. If you see `ffmpeg timeout`,
+the host was overloaded. Retry the failed tracks with fewer `WORKERS`, or while the host is quieter.
 
 ## Measurement modes
 
@@ -169,7 +259,9 @@ plex-loudness queue --library "TV Shows" --added-since 90d --dry-run
 plex-loudness queue --library Movies --year 1990-1999 --mode quick
 plex-loudness queue --items 12345 67890                # specific Plex items
 plex-loudness watch                                    # live text view
-plex-loudness batches [show|cancel|resume|retry|delete] <batch>
+plex-loudness batches [show|pause|resume|cancel|retry|delete] <batch>
+plex-loudness workers [list]                           # each worker's state, CPU, memory, host load
+plex-loudness workers pause|resume <name|all>          # free a machine's CPU without losing progress
 plex-loudness import <batch> --dry-run
 plex-loudness import <batch>                           # backs up, writes, verifies
 plex-loudness compare <batch> --plex                   # against Plex's own values
@@ -178,7 +270,7 @@ plex-loudness selftest                                 # rebuild existing rows b
 plex-loudness-worker [--workers 16] [--batch <id>] [--once]
 ```
 
-Dates accept `30d`, `6w`, `3m`, `1y` or `YYYY-MM-DD`. Years accept `2001`, `1990-1999`, `2010-`
+Dates accept `30d`, `6w`, `3m`, `1y` or `YYYY-MM-DD` and match files *added or replaced* in that window. Years accept `2001`, `1990-1999`, `2010-`
 or `-1980`.
 
 ## Safety

@@ -1,10 +1,12 @@
-# Mount the media and the shared folder straight from SMB shares (e.g. a NAS) instead of host
-# paths - handy for a desktop worker under Docker Desktop. Add it in .env:
+# A worker that mounts the media and the shared folder straight from SMB shares (e.g. a NAS),
+# instead of host paths. Handy for a desktop worker under Docker Desktop. In .env:
+#   COMPOSE_PROFILES=worker
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.cifs.yml
 #   SMB_HOST=nas.local  SMB_MEDIA=media  SMB_WORK=share/plex-loudness  SMB_USER=...  SMB_PASSWORD=...
+#   WORK_PATH=.    (not used with this file, but it must be set)
 services:
-  plex-loudness:
-    volumes:
+  plex-loudness-worker:
+    volumes: !override
       - media:/media:ro
       - work:/work
 

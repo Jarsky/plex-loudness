@@ -5,8 +5,10 @@
         claims/<stream id>    a worker is measuring this track (refreshed as a heartbeat)
         results/<worker>.jsonl one line per measured track, per worker (no shared appends)
         cancelled             marker: workers stop taking tracks from this batch
+        paused                marker: workers freeze this batch's running tracks and take no new ones
         imported.json         marker: results were written into Plex
     <work_dir>/workers/<worker>.json   live status of each worker
+    <work_dir>/workers/<worker>.paused marker: that worker freezes everything and takes nothing new
 
 Claims use O_CREAT|O_EXCL, which is atomic on local disks and NFSv4, so two workers never
 measure the same track. A claim that hasn't been refreshed for STALE_SECONDS is taken over.
@@ -74,6 +76,10 @@ class Batch:
     @property
     def cancelled(self) -> bool:
         return (self.path / "cancelled").exists()
+
+    @property
+    def paused(self) -> bool:
+        return (self.path / "paused").exists()
 
     @property
     def imported(self) -> dict | None:
@@ -156,7 +162,7 @@ class Batch:
 
     def pending(self, results: dict | None = None) -> list[tuple[dict, dict]]:
         """Tracks that still need measuring (no result, or failed before the latest retry)."""
-        if self.cancelled or self.imported:
+        if self.cancelled or self.paused or self.imported:
             return []
         results = self.results() if results is None else results
         retry = self.data.get("retry", 0)
@@ -171,10 +177,23 @@ class Batch:
     # ---- controller actions
     def cancel(self) -> None:
         (self.path / "cancelled").touch()
+        self.unpause()          # frozen tracks wake up and finish rather than hang on to their claims
 
     def resume(self) -> None:
+        """Undo cancel and pause: workers pick the batch up again."""
+        for marker in ("cancelled", "paused"):
+            try:
+                (self.path / marker).unlink()
+            except FileNotFoundError:
+                pass
+
+    def pause(self) -> None:
+        (self.path / "paused").touch()
+        _shared(self.path / "paused", 0o666)
+
+    def unpause(self) -> None:
         try:
-            (self.path / "cancelled").unlink()
+            (self.path / "paused").unlink()
         except FileNotFoundError:
             pass
 
@@ -207,6 +226,8 @@ class Batch:
             state = "cancelled"
         elif ok + failed >= len(tracks):
             state = "finished"
+        elif self.paused:
+            state = "paused"
         elif running:
             state = "running"
         else:
@@ -234,7 +255,11 @@ class Queue:
         return [Batch(p) for p in sorted(self.root.iterdir()) if (p / "batch.json").is_file()]
 
     def get(self, batch_id: str) -> Batch:
-        matches = [b for b in self.batches() if b.id == batch_id or b.id.startswith(batch_id)]
+        batches = self.batches()
+        matches = [b for b in batches if b.id == batch_id or b.id.startswith(batch_id)]
+        if not matches:   # also by name: "movies" finds 20261110-163223-movies (the newest if several)
+            named = [b for b in batches if b.id.split("-", 2)[-1] == slug(batch_id)]
+            matches = named[-1:]
         if len(matches) != 1:
             known = ", ".join(b.id for b in self.batches()[-8:]) or "none"
             raise SystemExit(f"{'No' if not matches else 'More than one'} batch matching {batch_id!r} (recent: {known})")
@@ -270,5 +295,33 @@ class Queue:
             status = _read_json(path)
             if status:
                 status["alive"] = time.time() - status.get("updated", 0) < WORKER_ALIVE_SECONDS
+                status["pause_requested"] = self.worker_paused(status.get("name", path.stem))
                 out.append(status)
         return out
+
+    def get_worker(self, name: str) -> dict:
+        """A worker by name (or unique prefix), for the pause/resume commands."""
+        workers = self.workers()
+        matches = [w for w in workers if w["name"] == name] or [w for w in workers if w["name"].startswith(name)]
+        if len(matches) != 1:
+            known = ", ".join(w["name"] for w in workers) or "none"
+            raise SystemExit(f"{'No' if not matches else 'More than one'} worker matching {name!r} (known: {known})")
+        return matches[0]
+
+    # ---- pausing a whole worker (e.g. the desktop while you need its CPU)
+    def _pause_path(self, name: str) -> Path:
+        return self.workers_dir / f"{slug(name)}.paused"
+
+    def worker_paused(self, name: str) -> bool:
+        return self._pause_path(name).exists()
+
+    def pause_worker(self, name: str) -> None:
+        self.ensure()
+        self._pause_path(name).touch()
+        _shared(self._pause_path(name), 0o666)
+
+    def resume_worker(self, name: str) -> None:
+        try:
+            self._pause_path(name).unlink()
+        except FileNotFoundError:
+            pass

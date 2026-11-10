@@ -18,6 +18,7 @@ from . import __version__
 from .analysis import Mode, measure_track, rss_mb
 from .batches import Batch, Queue
 from .config import Config, load
+from .resources import Sampler
 
 
 def map_path(path: str, mapping: dict[str, str]) -> str:
@@ -72,6 +73,10 @@ class Worker:
         self.active: dict[tuple[str, int], dict] = {}
         self.stats = {"ok": 0, "failed": 0, "measured_s": 0.0, "audio_s": 0.0}
         self.started = time.time()
+        # pause state, refreshed from the shared folder every loop (see refresh_pauses)
+        self.self_paused = False
+        self.paused_batches: set[str] = set()
+        self.sampler = Sampler()           # CPU/memory of this container and its host, per heartbeat
         self.paths = PathResolver(config.worker.path_map, config.worker.media_root,
                                   log=lambda text: print(f"{time.strftime('%H:%M:%S')} {text}", flush=True))
 
@@ -83,8 +88,21 @@ class Worker:
         elapsed = time.time() - self.started
         return {"version": __version__, "slots": self.slots, "started": self.started, "elapsed": elapsed,
                 "active": sorted(active, key=lambda a: a["started"]), "stopping": self.stop.is_set(),
+                "paused": self.self_paused, "resources": self.sampler.sample(),
                 "ok": stats["ok"], "failed": stats["failed"], "audio_hours": stats["audio_s"] / 3600,
                 "rate": stats["audio_s"] / elapsed if elapsed > 60 else 0}
+
+    def refresh_pauses(self) -> None:
+        """Read the pause markers: this worker's own, and every batch's."""
+        was = self.self_paused
+        self.self_paused = self.queue.worker_paused(self.name)
+        self.paused_batches = {b.id for b in self.queue.batches() if b.paused}
+        if self.self_paused != was:
+            print(f"{time.strftime('%H:%M:%S')} {'paused: running tracks frozen, taking no new ones' if self.self_paused else 'resumed'}",
+                  flush=True)
+
+    def is_paused(self, batch_id: str) -> bool:
+        return self.self_paused or batch_id in self.paused_batches
 
     def heartbeat(self) -> None:
         while not self.stop.wait(15):
@@ -108,6 +126,10 @@ class Worker:
         def progress(position: float, pid: int) -> None:
             info["position"], info["pid"] = position, pid
 
+        def paused() -> bool:
+            info["paused"] = self.is_paused(batch.id)
+            return info["paused"]
+
         try:
             if not os.path.exists(path):
                 record = {"stream_id": stream["stream_id"], "index": stream["index"], "codec": stream["codec"],
@@ -116,7 +138,8 @@ class Worker:
                                    f"{self.config.worker.media_root}, or set PATH_MAP)"}
             else:
                 timeout = duration * self.config.worker.timeout_factor + self.config.worker.timeout_base
-                record = measure_track(path, stream, duration, mode, timeout, progress, self.stop)
+                record = measure_track(path, stream, duration, mode, timeout, progress, self.stop, paused,
+                                       stall=self.config.worker.stall_seconds)
             if record["status"] == "stopped":
                 return
             record.update(part_id=job["part_id"], file=job["file"], size=job["size"], retry=retry,
@@ -135,8 +158,10 @@ class Worker:
                 self.active.pop(key, None)
 
     def next_tracks(self, free: int) -> list:
-        """Claim up to `free` tracks, oldest batch first."""
+        """Claim up to `free` tracks, oldest batch first (none while this worker is paused)."""
         picked = []
+        if self.self_paused:
+            return picked
         for batch in self.queue.batches():
             if self.only_batch and not batch.id.startswith(self.only_batch):
                 continue
@@ -166,6 +191,7 @@ class Worker:
         idle_since = None
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.slots) as pool:
             while not self.stop.is_set():
+                self.refresh_pauses()
                 futures = {f for f in futures if not f.done()}
                 free = self.slots - len(futures)
                 picked = self.next_tracks(free) if free else []

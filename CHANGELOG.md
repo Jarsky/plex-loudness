@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.0
+- **Added or replaced since**: the date filters now match files Radarr/Sonarr replaced, not only
+  newly added movies/episodes. Plex keeps a movie's original `added_at` when its file is upgraded;
+  the new file's audio streams carry the replacement date (`media_streams.created_at`). On a real
+  library, "30d" went from 36 to 575 movies.
+- **Pause / resume** a batch (`s`, `batches pause|resume`) or a whole worker (`w`,
+  `workers pause|resume <name|all>`): running ffmpeg processes are frozen (SIGSTOP/SIGCONT), keep
+  their progress, and paused time doesn't count towards the timeout. Cancelling a paused batch
+  wakes its tracks so they finish.
+- **Worker CPU and memory in the controller**: each worker reports its container's CPU (cores in
+  use / limit) and memory (in use / limit) and its host's CPU, load and memory; the TUI flags an
+  overloaded host. Also in `plex-loudness workers` / `status`.
+- **Timeouts**: a track is killed when ffmpeg makes no progress for `STALL_SECONDS` (900), and the
+  hard limit is now 4 x duration + 30 min (`TIMEOUT_FACTOR`; was 1.5x), so slow tracks on a busy
+  host finish instead of being killed. Timeout errors say why.
+- **Docker**: one compose file, two services: `plex-loudness` (controller) and
+  `plex-loudness-worker`, picked with `COMPOSE_PROFILES` (`controller`, `worker`,
+  `controller,worker`). Replaces `ROLE` and `docker-compose.controller.yml`; see the README for
+  upgrading.
+- README: step-by-step controller/worker deployment, the shared folder and media path mapping,
+  pause/cancel/retry, timeouts.
+
 ## 2.1.1
 - README: why this exists (Plex forum reports), banner, screenshot, desktop-worker guide.
 - `docker-compose.cifs.yml`: mount the media and shared folder from SMB shares (Docker Desktop).

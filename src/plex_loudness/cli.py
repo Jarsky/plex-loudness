@@ -23,6 +23,8 @@ from .compare import compare, format_report, plex_reference
 from .config import load
 from .importer import apply_import, plan_import, selftest
 from .plexdb import PlexDB
+from .resources import describe as describe_resources
+from .resources import overloaded
 
 
 def human(seconds: float) -> str:
@@ -93,9 +95,16 @@ def print_workers(queue: Queue) -> None:
         return
     for w in workers:
         state = "alive" if w["alive"] else f"silent for {human(time.time() - w['updated'])}"
+        if w.get("paused") or w.get("pause_requested"):
+            state += ", PAUSED" if w.get("paused") else ", pause requested"
         print(f"worker {w['name']}: {state}, {len(w.get('active', []))}/{w.get('slots', '?')} busy, "
               f"{w.get('ok', 0)} ok / {w.get('failed', 0)} failed, {w.get('audio_hours', 0):.1f} h of audio, "
               f"{w.get('rate', 0):.0f}x real time, v{w.get('version', '?')}")
+        res = w.get("resources") or {}
+        if res and w["alive"]:
+            cpu, mem, host = describe_resources(res)
+            warn = "  (host overloaded: fewer WORKERS would be as fast)" if overloaded(res) else ""
+            print(f"    using {cpu}, {mem}  |  host {host}{warn}")
 
 
 def cmd_status(config, args) -> int:
@@ -146,9 +155,13 @@ def cmd_batches(config, args) -> int:
     elif args.action == "cancel":
         batch.cancel()
         print(f"Cancelled {batch.id}: workers finish the tracks they're on and take no more.")
+    elif args.action == "pause":
+        batch.pause()
+        print(f"Paused {batch.id}: running tracks are frozen (no CPU) within a few seconds and no new ones start."
+              f" Resume with: plex-loudness batches resume {batch.id}")
     elif args.action == "resume":
         batch.resume()
-        print(f"Resumed {batch.id}")
+        print(f"Resumed {batch.id}: frozen tracks carry on where they stopped")
     elif args.action == "retry":
         print(f"{batch.id}: {batch.retry_failed()} failed tracks will be tried again")
     elif args.action == "delete":
@@ -156,6 +169,25 @@ def cmd_batches(config, args) -> int:
             raise SystemExit("Deleting removes its results too. Add --yes to confirm.")
         queue.delete(batch)
         print(f"Deleted {batch.id}")
+    return 0
+
+
+def cmd_workers(config, args) -> int:
+    """List workers, or pause/resume one (or all): pausing frees the CPU without losing progress."""
+    queue = Queue(config.work_dir)
+    if args.action == "list":
+        print_workers(queue)
+        return 0
+    if not args.worker:
+        raise SystemExit(f"workers {args.action} needs a worker name, or 'all'")
+    names = [w["name"] for w in queue.workers()] if args.worker == "all" else [queue.get_worker(args.worker)["name"]]
+    for name in names:
+        if args.action == "pause":
+            queue.pause_worker(name)
+            print(f"Pausing {name}: its running tracks freeze within a few seconds and it takes no new ones.")
+        else:
+            queue.resume_worker(name)
+            print(f"Resuming {name}")
     return 0
 
 
@@ -265,8 +297,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("queue", help="queue audio tracks for the workers")
     p.add_argument("--library", action="append", metavar="NAME|ID", help="library to include (repeatable)")
-    p.add_argument("--added-since", metavar="WHEN", help="added to Plex since: 30d, 6w, 3m, 1y or YYYY-MM-DD")
-    p.add_argument("--added-before", metavar="WHEN", help="added to Plex before (same formats)")
+    p.add_argument("--added-since", metavar="WHEN",
+                   help="file added or replaced since: 30d, 6w, 3m, 1y or YYYY-MM-DD (an upgraded file counts as new)")
+    p.add_argument("--added-before", metavar="WHEN", help="file added or replaced before (same formats)")
     p.add_argument("--year", metavar="RANGE", help="release year: 2001, 1990-1999, 2010-, -1980")
     p.add_argument("--items", type=int, nargs="+", metavar="ID", help="only these Plex item ids")
     p.add_argument("--limit", type=int, default=0, help="at most this many files")
@@ -280,10 +313,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="only show how much would be queued")
 
     p = sub.add_parser("batches", help="list or manage batches")
-    p.add_argument("action", nargs="?", default="list", choices=["list", "show", "cancel", "resume", "retry", "delete"])
+    p.add_argument("action", nargs="?", default="list",
+                   choices=["list", "show", "pause", "resume", "cancel", "retry", "delete"],
+                   help="pause freezes running tracks and keeps their progress; resume carries on;"
+                        " cancel lets running tracks finish and starts no more")
     p.add_argument("batch", nargs="?", help="batch id (a unique prefix is enough)")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--yes", action="store_true")
+
+    p = sub.add_parser("workers", help="list workers, or pause/resume one to free its CPU")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "pause", "resume"])
+    p.add_argument("worker", nargs="?", help="worker name (a unique prefix is enough), or 'all'")
 
     p = sub.add_parser("watch", help="live text view of batches and workers")
     p.add_argument("--interval", type=float, default=5)
@@ -311,13 +351,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"tui": cmd_tui, "libraries": cmd_libraries, "status": cmd_status, "queue": cmd_queue,
-            "batches": cmd_batches, "watch": cmd_watch, "import": cmd_import, "compare": cmd_compare,
+            "batches": cmd_batches, "workers": cmd_workers, "watch": cmd_watch, "import": cmd_import, "compare": cmd_compare,
             "selftest": cmd_selftest, "backup": cmd_backup, "config": cmd_config}
 
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if "worker" in argv[:3]:
+    positional = [a for i, a in enumerate(argv) if not a.startswith("-") and (i == 0 or argv[i - 1] != "--config")]
+    if positional[:1] == ["worker"]:
         from .worker import main as worker_main
         rest = list(argv)
         rest.remove("worker")

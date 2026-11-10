@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -113,47 +114,83 @@ def rss_mb(pid: int | None) -> int:
 
 
 def run_ffmpeg(cmd: list[str], timeout: float, on_progress: Callable[[float, int], None] | None = None,
-               stop: threading.Event | None = None):
-    """Run ffmpeg, reporting (seconds done, pid) from its -progress output. Returns (stderr, code)."""
+               stop: threading.Event | None = None, paused: Callable[[], bool] | None = None,
+               poll: float = 1.0, stall: float = 0):
+    """Run ffmpeg, reporting (seconds done, pid) from its -progress output.
+
+    While `paused()` is true the process is frozen with SIGSTOP (no CPU, progress kept) and woken
+    with SIGCONT when it turns false. Time spent paused doesn't count towards the timeout.
+    `stall` (seconds, 0 = off) kills ffmpeg when its progress output stops moving for that long.
+    Returns (stderr, code, seconds paused); code is the exit code, "timeout", "stalled" or "stopped"."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     err_lines: list[str] = []
     reader = threading.Thread(target=lambda: err_lines.extend(proc.stderr), daemon=True)
     reader.start()
-    deadline = time.monotonic() + timeout
-    killed = {"why": None}
+    state = {"why": None, "deadline": time.monotonic() + timeout, "frozen_at": None, "paused_s": 0.0,
+             "moved": time.monotonic(), "position": -1.0}   # when the position last advanced (or resumed)
+
+    def signal_proc(sig) -> None:
+        try:
+            proc.send_signal(sig)
+        except (ProcessLookupError, OSError):
+            pass
 
     def watchdog():
         while proc.poll() is None:
-            if time.monotonic() > deadline:
-                killed["why"] = "timeout"
-            elif stop is not None and stop.is_set():
-                killed["why"] = "stopped"
-            if killed["why"]:
-                proc.kill()
+            now = time.monotonic()
+            if stop is not None and stop.is_set():
+                state["why"] = "stopped"
+            elif state["frozen_at"] is None and now > state["deadline"]:
+                state["why"] = "timeout"
+            elif state["frozen_at"] is None and stall and now - state["moved"] > stall:
+                state["why"] = "stalled"
+            if state["why"]:
+                proc.kill()                       # SIGKILL also ends a frozen process
                 return
-            time.sleep(1)
+            want = bool(paused and paused())
+            if want and state["frozen_at"] is None:
+                signal_proc(signal.SIGSTOP)
+                state["frozen_at"] = now
+            elif not want and state["frozen_at"] is not None:
+                signal_proc(signal.SIGCONT)
+                frozen = now - state["frozen_at"]
+                state["deadline"] += frozen
+                state["paused_s"] += frozen
+                state["frozen_at"] = None
+                state["moved"] = now
+            time.sleep(poll)
 
     threading.Thread(target=watchdog, daemon=True).start()
     if on_progress:
         on_progress(0.0, proc.pid)
     for line in proc.stdout:
-        if line.startswith("out_time_us=") and on_progress:
+        if line.startswith("out_time_us="):
             try:
-                on_progress(int(line.split("=", 1)[1]) / 1e6, proc.pid)
+                position = int(line.split("=", 1)[1]) / 1e6
             except ValueError:
-                pass
+                continue
+            # ffmpeg repeats its progress block every few seconds even when stuck: only a moving
+            # position counts as progress
+            if position > state["position"]:
+                state["position"], state["moved"] = position, time.monotonic()
+            if on_progress:
+                on_progress(position, proc.pid)
     code = proc.wait()
     reader.join(5)
-    return "".join(err_lines), (killed["why"] or code)
+    if state["frozen_at"] is not None:
+        state["paused_s"] += time.monotonic() - state["frozen_at"]
+    return "".join(err_lines), (state["why"] or code), state["paused_s"]
 
 
 def measure_track(path: str, stream: dict, duration_s: float, mode: Mode, timeout: float,
-                  on_progress=None, stop=None) -> dict:
-    """Measure one audio stream. Returns a result record (status ok/failed/stopped)."""
+                  on_progress=None, stop=None, paused=None, stall: float = 0) -> dict:
+    """Measure one audio stream. Returns a result record (status ok/failed/stopped).
+    `paused` (a callable) freezes ffmpeg while it returns true; see run_ffmpeg."""
     cmd, total, listing = ffmpeg_command(path, stream["index"], duration_s, mode)
     started = time.monotonic()
+    paused_s = 0.0
     try:
-        err, code = run_ffmpeg(cmd, timeout, on_progress, stop)
+        err, code, paused_s = run_ffmpeg(cmd, timeout, on_progress, stop, paused, stall=stall)
     except OSError as exc:
         err, code = str(exc), "error"
     finally:
@@ -163,8 +200,10 @@ def measure_track(path: str, stream: dict, duration_s: float, mode: Mode, timeou
             except OSError:
                 pass
     record = {"stream_id": stream["stream_id"], "index": stream["index"], "codec": stream["codec"],
-              "mode": mode.name, "seconds": round(time.monotonic() - started, 1), "measured_s": total,
+              "mode": mode.name, "seconds": round(time.monotonic() - started - paused_s, 1), "measured_s": total,
               "tool": f"plex-loudness {__version__}"}
+    if paused_s:
+        record["paused_s"] = round(paused_s, 1)
     if code == "stopped":
         return dict(record, status="stopped")
     measure = parse_measure(err)
@@ -172,7 +211,9 @@ def measure_track(path: str, stream: dict, duration_s: float, mode: Mode, timeou
     if fields:
         return dict(record, status="ok", ln=fields)
     tail = [line for line in err.strip().splitlines() if line and not line.startswith(" ")][-3:]
-    reason = "no usable measurement (silent track?)" if code == 0 else f"ffmpeg {code}"
+    reason = {0: "no usable measurement (silent track?)",
+              "timeout": f"ffmpeg timeout after {timeout / 60:.0f} min (host too busy? retry, or raise TIMEOUT_FACTOR)",
+              "stalled": f"ffmpeg stalled: no progress for {stall / 60:.0f} min"}.get(code, f"ffmpeg {code}")
     record.update(status="failed", error=f"{reason}: " + " | ".join(tail)[:400])
     if measure:
         record["measure"] = measure

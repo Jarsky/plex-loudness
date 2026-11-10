@@ -32,11 +32,14 @@ from .catalog import Filter, libraries, parse_when, parse_years, preview, select
 from .config import Config
 from .importer import apply_import, plan_import
 from .plexdb import PlexDB
+from .resources import describe as describe_resources
+from .resources import overloaded
 
 NEON = ["#ff2bd6", "#d63bff", "#9b5cff", "#6a7dff", "#3fa0ff", "#22d3ee", "#22f5c8"]
 PINK, VIOLET, BLUE, CYAN, MINT = "#ff2bd6", "#9b5cff", "#3fa0ff", "#22d3ee", "#22f5c8"
+AMBER = "#ffb02e"
 STATE_STYLE = {"running": f"bold {CYAN}", "queued": VIOLET, "finished": f"bold {MINT}", "imported": "green",
-               "cancelled": "grey50"}
+               "cancelled": "grey50", "paused": f"bold {AMBER}"}
 _FIGLET: dict[str, str] = {}
 
 
@@ -129,7 +132,7 @@ class LoudnessApp(App):
     #hints {{ height: 1; color: grey; content-align: center middle; }}
     .hint {{ color: grey; margin-top: 1; }}
     #preview {{ margin-top: 1; height: auto; }}
-    #workers {{ height: auto; color: grey; }}
+    #workers {{ height: auto; max-height: 8; }}
     Input {{ border: round #4a4a4a; background: transparent; height: 3; }}
     Input:focus {{ border: round {PINK}; }}
     .row {{ height: auto; }}
@@ -153,8 +156,9 @@ class LoudnessApp(App):
     Button.danger {{ border: round #ff5f5f; color: #ff5f5f; }}
     """
     BINDINGS = [("q", "quit", "quit"), ("p", "preview", "preview"), ("a", "queue", "queue"),
-                ("i", "import_batch", "import"), ("t", "retry", "retry"), ("c", "cancel", "cancel"),
-                ("d", "delete", "delete"), ("l", "reload_libraries", "libraries"), ("f5", "refresh", "refresh")]
+                ("i", "import_batch", "import"), ("t", "retry", "retry"), ("s", "pause_batch", "pause"),
+                ("c", "cancel", "cancel"), ("w", "pause_worker", "pause worker"), ("d", "delete", "delete"),
+                ("l", "reload_libraries", "libraries"), ("f5", "refresh", "refresh")]
 
     def __init__(self, config: Config):
         super().__init__()
@@ -164,6 +168,7 @@ class LoudnessApp(App):
         self.library_names: dict[int, str] = {}
         self.library_rows: list[dict] = []
         self.selected_batch: str | None = None
+        self.selected_worker: str | None = None
         self.summaries: list[dict] = []
         self.worker_rows: list[dict] = []
 
@@ -180,7 +185,7 @@ class LoudnessApp(App):
                 panel.border_title = "queue work"
                 yield Label("libraries  [dim](space toggles)[/]", classes="hint")
                 yield SelectionList[int](id="libs")
-                yield Label("added since / before  [dim]30d · 6m · 1y · YYYY-MM-DD[/]", classes="hint")
+                yield Label("added or replaced since / before  [dim]30d · 6m · 1y · YYYY-MM-DD[/]", classes="hint")
                 with Horizontal(classes="row"):
                     yield Input(placeholder="since", id="since")
                     yield Input(placeholder="before", id="before")
@@ -204,12 +209,13 @@ class LoudnessApp(App):
                     with Horizontal(classes="buttons"):
                         yield Button("import into plex", id="import-btn", classes="ok")
                         yield Button("retry failed", id="retry-btn")
+                        yield Button("pause / resume", id="pause-btn")
                         yield Button("cancel / resume", id="cancel-btn")
                         yield Button("delete", id="delete-btn", classes="danger")
                 with Vertical(id="now-panel", classes="panel") as panel:
                     panel.border_title = "now measuring"
                     yield DataTable(id="active", zebra_stripes=True)
-                    yield Static(id="workers")
+                    yield DataTable(id="workers", cursor_type="row", zebra_stripes=True)
         log = RichLog(id="log", wrap=True, markup=True)
         log.border_title = "activity"
         yield log
@@ -219,8 +225,11 @@ class LoudnessApp(App):
         self.query_one("#batches", DataTable).add_columns(
             "batch", "mode", "state", "tracks", "ok", "failed", "running", "audio h", "filter")
         self.query_one("#active", DataTable).add_columns("worker", "elapsed", "done", "mem", "title", "track")
-        keys = [("q", "quit"), ("p", "preview"), ("a", "add batch"), ("i", "import"), ("t", "retry failed"),
-                ("c", "cancel/resume"), ("d", "delete"), ("l", "reload libraries"), ("tab", "next field")]
+        self.query_one("#workers", DataTable).add_columns("worker", "state", "busy", "cpu", "mem", "host",
+                                                          "ok", "failed", "speed", "version")
+        keys = [("q", "quit"), ("p", "preview"), ("a", "add batch"), ("i", "import"), ("t", "retry"),
+                ("s", "pause batch"), ("w", "pause worker"), ("c", "cancel"), ("d", "delete"),
+                ("l", "libraries"), ("tab", "next field")]
         self.query_one("#hints", Static).update(
             Text.from_markup("  ·  ".join(f"[bold {CYAN}]{k}[/] {v}" for k, v in keys)))
         self.draw_banner()
@@ -252,12 +261,12 @@ class LoudnessApp(App):
     def update_overview(self) -> None:
         items = sum(r["items"] for r in self.library_rows)
         done = sum(r["done"] for r in self.library_rows)
-        active = [s for s in self.summaries if s["state"] in ("running", "queued")]
+        active = [s for s in self.summaries if s["state"] in ("running", "queued", "paused")]
         pending = sum(s["tracks"] - s["ok"] - s["failed"] for s in active)
         pending_h = sum(s["hours"] - s["hours_done"] for s in active)
         running = sum(s["running"] for s in self.summaries)
         failed = sum(s["failed"] for s in self.summaries if s["state"] != "imported")
-        to_import = sum(s["ok"] for s in self.summaries if s["state"] in ("finished", "running", "queued"))
+        to_import = sum(s["ok"] for s in self.summaries if s["state"] in ("finished", "running", "queued", "paused"))
         alive = [w for w in self.worker_rows if w["alive"]]
         rate = sum(w.get("rate", 0) for w in alive)
         eta = human(pending_h * 3600 / rate) if rate and pending_h else "—"
@@ -401,23 +410,42 @@ class LoudnessApp(App):
             table.move_cursor(row=ids.index(keep))
         active = self.query_one("#active", DataTable)
         active.clear()
-        lines = []
+        wtable = self.query_one("#workers", DataTable)
+        keep_worker = self.selected_worker
+        wtable.clear()
         for w in workers:
             busy = len(w.get("active", [])) if w["alive"] else 0
-            state = f"[bold {MINT}]alive[/]" if w["alive"] else f"[#ff5f5f]silent {human(time.time() - w['updated'])}[/]"
-            lines.append(f"[bold #e0e0e0]{w['name']}[/]  {state}  ·  {busy}/{w.get('slots', '?')} busy  ·  "
-                         f"[{MINT}]{w.get('ok', 0):,} ok[/]  ·  {w.get('failed', 0)} failed  ·  "
-                         f"{w.get('rate', 0):.0f}× real time  ·  v{w.get('version', '?')}")
+            if not w["alive"]:
+                state = Text(f"silent {human(time.time() - w['updated'])}", style="#ff5f5f")
+            elif w.get("paused"):
+                state = Text("paused", style=f"bold {AMBER}")
+            elif w.get("pause_requested"):
+                state = Text("pausing…", style=AMBER)      # marker set, worker hasn't seen it yet (or is older)
+            else:
+                state = Text("alive", style=f"bold {MINT}")
+            res = (w.get("resources") or {}) if w["alive"] else {}
+            cpu, mem, host = describe_resources(res)
+            host_text = Text(host, style=f"bold {AMBER}" if overloaded(res) else "grey62")
+            if overloaded(res):
+                host_text.append("  overloaded", style=AMBER)
+            wtable.add_row(Text(w["name"], style="bold #e0e0e0"), state, f"{busy}/{w.get('slots', '?')}",
+                           Text(cpu, style=CYAN), Text(mem, style=CYAN), host_text,
+                           Text(f"{w.get('ok', 0):,}", style=MINT), str(w.get("failed", 0)),
+                           f"{w.get('rate', 0):.0f}×", Text(f"v{w.get('version', '?')}", style="grey62"), key=w["name"])
             if not w["alive"]:
                 continue
             for a in w.get("active", []):
                 pct = 100 * a["position"] / a["total"] if a.get("total") else 0
-                active.add_row(Text(w["name"], style=CYAN), human(time.time() - a["started"]),
-                               Text(f"{pct:3.0f}%", style=f"bold {PINK}"), Text(f"{a.get('rss_mb', 0)} MB", style="grey62"),
-                               a["title"][:64], Text(a["codec"], style="grey62"))
-        self.query_one("#workers", Static).update(
-            Text.from_markup("\n".join(lines) or "[yellow]no workers have reported in yet[/]"))
-        self.query_one("#now-panel").border_subtitle = f"{active.row_count} running"
+                done = Text(f"⏸ {pct:3.0f}%", style=f"bold {AMBER}") if a.get("paused") else \
+                    Text(f"{pct:3.0f}%", style=f"bold {PINK}")
+                active.add_row(Text(w["name"], style=CYAN), human(time.time() - a["started"]), done,
+                               Text(f"{a.get('rss_mb', 0)} MB", style="grey62"), a["title"][:64],
+                               Text(a["codec"], style="grey62"))
+        names = [w["name"] for w in workers]
+        if keep_worker in names:
+            wtable.move_cursor(row=names.index(keep_worker))
+        self.query_one("#now-panel").border_subtitle = (f"{active.row_count} running" if workers
+                                                        else "no workers have reported in yet")
         self.query_one("#batches-panel").border_subtitle = f"{len(summaries)} batches"
         self.update_overview()
         self.update_subtitle()
@@ -425,6 +453,8 @@ class LoudnessApp(App):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "batches" and event.row_key is not None:
             self.selected_batch = event.row_key.value
+        elif event.data_table.id == "workers" and event.row_key is not None:
+            self.selected_worker = event.row_key.value
 
     def selected(self):
         if not self.selected_batch:
@@ -470,6 +500,31 @@ class LoudnessApp(App):
             self.log_line(f"{batch.id}: {batch.retry_failed()} failed tracks queued again")
             self.action_refresh()
 
+    def action_pause_batch(self) -> None:
+        batch = self.selected()
+        if not batch:
+            return
+        if batch.paused:
+            batch.unpause()
+            self.log_line(f"resumed {batch.id} [grey50](frozen tracks carry on)[/]")
+        else:
+            batch.pause()
+            self.log_line(f"paused {batch.id} [grey50](running tracks freeze within a few seconds, progress kept)[/]")
+        self.action_refresh()
+
+    def action_pause_worker(self) -> None:
+        name = self.selected_worker
+        if not name:
+            self.log_line("[yellow]select a worker first (in the list under now measuring)[/]")
+            return
+        if self.queue.worker_paused(name):
+            self.queue.resume_worker(name)
+            self.log_line(f"resumed worker {name}")
+        else:
+            self.queue.pause_worker(name)
+            self.log_line(f"paused worker {name} [grey50](frees its CPU; tracks stay claimed and carry on when resumed)[/]")
+        self.action_refresh()
+
     def action_cancel(self) -> None:
         batch = self.selected()
         if not batch:
@@ -500,7 +555,8 @@ class LoudnessApp(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions = {"preview-btn": self.action_preview, "queue-btn": self.queue_batch,
                    "import-btn": self.action_import_batch, "retry-btn": self.action_retry,
-                   "cancel-btn": self.action_cancel, "delete-btn": self.action_delete}
+                   "pause-btn": self.action_pause_batch, "cancel-btn": self.action_cancel,
+                   "delete-btn": self.action_delete}
         if event.button.id in actions:
             actions[event.button.id]()
 

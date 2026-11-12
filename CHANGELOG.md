@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.1
+- **Deleting a batch stops its running tracks.** Workers kept measuring a deleted batch's tracks
+  (hours, for a long film in full mode), so a new batch sat at *queued* with no free slots, and the
+  results recreated the deleted folder. Now a worker kills them within seconds and frees the slots.
+  *Now measuring* also shows each track's batch (*deleted* in red).
+- **Paused time isn't counted** in a running track's elapsed time (TUI *now measuring* and
+  `plex-loudness status`): the timer stands still while the batch or worker is paused.
+- **A paused worker is no longer hidden behind a "running" batch.** Resuming a batch doesn't
+  resume a worker paused with `w`, and the batch still looked like it was running while nothing
+  moved. Now the batch shows *worker paused* when every live worker is paused, and resuming a batch
+  (TUI or `batches resume`) says which workers are still paused and how to resume them.
+- **TUI buttons**: *pause* turns into *resume* for a paused or cancelled batch (it also un-cancels).
+  *Cancel* is red, only cancels, asks first (the default answer is *keep it*), and is greyed out
+  once the batch is cancelled or finished. New **pause worker / resume worker** button under the
+  workers list (same as `w`; with one worker it doesn't need selecting).
+
 ## 2.2.0
 - **Added or replaced since**: the date filters now match files Radarr/Sonarr replaced, not only
   newly added movies/episodes. Plex keeps a movie's original `added_at` when its file is upgraded;

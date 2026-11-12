@@ -4,10 +4,11 @@ import time
 import pytest
 
 from plex_loudness.analysis import FULL, QUICK, Mode, ffmpeg_command, parse_measure, run_ffmpeg, sample_starts
-from plex_loudness.batches import Queue
+from plex_loudness.batches import Queue, run_seconds
 from plex_loudness.catalog import Filter, _where, parse_when, parse_years, preview, select_jobs
+from plex_loudness.config import Config
 from plex_loudness.extradata import build_extra, loudness_fields, url_encode
-from plex_loudness.worker import map_path
+from plex_loudness.worker import TrackStop, Worker, map_path
 
 PLEX_ROW = ('{"ln:gainOffset":"0.97","ln:loudness":"-22.88","ln:loudnessAnalysisVersion":"0.02","ln:lra":"21.20",'
             '"ln:peak":"-2.46","ln:threshold":"-35.22","ma:audioChannelLayout":"5.1(side)",'
@@ -248,6 +249,24 @@ def test_worker_pause_markers(tmp_path):
         queue.get_worker("desktop")
 
 
+def test_paused_workers_are_listed_so_a_batch_resume_can_warn(tmp_path):
+    queue = Queue(tmp_path)
+    queue.write_worker("nas", {"slots": 4, "active": []})
+    queue.write_worker("desktop", {"slots": 4, "active": []})
+    assert queue.paused_workers() == []
+    queue.pause_worker("nas")
+    assert queue.paused_workers() == ["nas"]
+
+
+def test_elapsed_time_of_a_track_leaves_out_its_pauses():
+    now = 10_000.0
+    assert run_seconds({"started": now - 100}, now) == 100                       # older workers: no pause info
+    assert run_seconds({"started": now - 100, "paused_s": 30, "paused_since": None}, now) == 70
+    # paused right now for 20 s (after an earlier 30 s pause): the timer stands still
+    assert run_seconds({"started": now - 100, "paused_s": 30, "paused_since": now - 20}, now) == 50
+    assert run_seconds({"started": now - 100, "paused_s": 30, "paused_since": now - 20}, now + 60) == 50
+
+
 def test_stalled_ffmpeg_is_killed_but_a_slow_one_is_not(tmp_path):
     # repeats the same position (stuck) -> stalled
     stuck = tmp_path / "stuck.sh"
@@ -289,3 +308,25 @@ def test_resource_sampler_reads_proc_and_cgroup(tmp_path):
     assert overloaded(dict(res, host_cpus=32)) and not overloaded(dict(res, host_load=10, host_cpus=32))
     assert describe({}) == ("—", "—", "—")
 
+
+
+def test_tracks_of_a_deleted_batch_are_dropped_and_leave_no_folder_behind(tmp_path):
+    config = Config()
+    config.work_dir = str(tmp_path)
+    queue = Queue(tmp_path)
+    batch = queue.create("movies", [{"title": "x", "file": "/x", "duration_ms": 1000, "part_id": 1, "size": 1,
+                                     "streams": [{"stream_id": 1, "index": 1, "codec": "aac"}]}],
+                         FULL.as_dict(), "", "test")
+    worker = Worker(config, slots=1)
+    key = (batch.id, 1)
+    worker.active[key] = {"batch": batch.id, "batch_path": str(batch.path), "title": "x"}
+    worker.track_stops[key] = stop = TrackStop(worker.stop)
+    worker.drop_deleted()
+    assert not stop.is_set()
+    queue.delete(batch)
+    worker.drop_deleted()
+    assert not stop.is_set()            # one miss could be a share hiccup
+    worker.drop_deleted()
+    assert stop.is_set() and not worker.stop.is_set()
+    batch.add_result("nas", {"stream_id": 1, "status": "ok"})
+    assert not batch.path.exists()

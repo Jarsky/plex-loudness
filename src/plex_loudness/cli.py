@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import __version__
 from .analysis import Mode
-from .batches import Queue
+from .batches import Queue, run_seconds
 from .catalog import Filter, libraries, parse_when, parse_years, preview, resolve_sections, select_jobs
 from .compare import compare, format_report, plex_reference
 from .config import load
@@ -162,6 +162,9 @@ def cmd_batches(config, args) -> int:
     elif args.action == "resume":
         batch.resume()
         print(f"Resumed {batch.id}: frozen tracks carry on where they stopped")
+        for name in queue.paused_workers():
+            print(f"Note: worker {name} is paused itself, so its tracks stay frozen."
+                  f" Resume it with: plex-loudness workers resume {name}")
     elif args.action == "retry":
         print(f"{batch.id}: {batch.retry_failed()} failed tracks will be tried again")
     elif args.action == "delete":
@@ -206,7 +209,7 @@ def cmd_watch(config, args) -> int:
                 continue
             for a in w.get("active", []):
                 pct = f"{100 * a['position'] / a['total']:.0f}%" if a.get("total") else "?"
-                lines.append(f"  {w['name'][:10]:<11}{human(time.time() - a['started']):>8} {pct:>5} "
+                lines.append(f"  {w['name'][:10]:<11}{human(run_seconds(a)):>8} {pct:>5} "
                              f"{a.get('rss_mb', 0):>5}MB  {a['title'][:60]} [{a['codec']}]")
         if args.once:
             print("\n".join(lines))

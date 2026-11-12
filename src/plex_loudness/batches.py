@@ -61,6 +61,15 @@ def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "batch"
 
 
+def run_seconds(active: dict, now: float | None = None) -> float:
+    """How long a running track has been measuring, not counting time spent paused."""
+    now = time.time() if now is None else now
+    paused = active.get("paused_s") or 0.0
+    if active.get("paused_since"):
+        paused += now - active["paused_since"]
+    return max(now - active["started"] - paused, 0.0)
+
+
 class Batch:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -72,6 +81,9 @@ class Batch:
     @property
     def data(self) -> dict:
         return _read_json(self.path / "batch.json", {})
+
+    def exists(self) -> bool:
+        return (self.path / "batch.json").is_file()
 
     @property
     def cancelled(self) -> bool:
@@ -106,6 +118,8 @@ class Batch:
         return merged
 
     def add_result(self, worker: str, record: dict) -> None:
+        if not self.exists():
+            return              # deleted while the track ran: don't bring its folder back
         folder = self.path / "results"
         _mkdir(folder)
         file = folder / f"{slug(worker)}.jsonl"
@@ -319,6 +333,10 @@ class Queue:
         self.ensure()
         self._pause_path(name).touch()
         _shared(self._pause_path(name), 0o666)
+
+    def paused_workers(self) -> list[str]:
+        """Live workers with a pause marker: they hold their tracks frozen whatever the batch says."""
+        return [w["name"] for w in self.workers() if w["alive"] and w["pause_requested"]]
 
     def resume_worker(self, name: str) -> None:
         try:

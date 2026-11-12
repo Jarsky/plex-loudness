@@ -202,13 +202,15 @@ In each `.env`, replace `ROLE=…` with `COMPOSE_PROFILES=controller` / `worker`
   then **queue batch** (`a`). A file counts as added when Radarr/Sonarr *replaced* it too: Plex keeps
   the movie's original "added" date, but the new file's audio streams are new.
 * **batches**: progress of each batch. **Import into plex** (`i`) shows what it's about to write and
-  asks first. Also **retry failed** (`t`), **pause / resume** (`s`), **cancel / resume** (`c`) and
+  asks first. Also **retry failed** (`t`), **pause / resume** (`s`), **cancel** (`c`, asks first) and
   **delete** (`d`).
 * **now measuring**: every track being measured on every worker, with progress and memory. Paused
   tracks show ⏸.
 * **workers**: one row per worker: state, busy slots, **CPU** (cores in use / its limit), **memory**
   (in use / its limit), and its **host's** CPU, load and memory, flagged *overloaded* when the host
-  has more work than cores. Select a worker and press `w` to pause or resume it.
+  has more work than cores. Select a worker and press **pause worker** (`w`) to pause or resume it
+  (with a single worker it doesn't need selecting). The **pause** button in *batches* pauses the
+  selected batch only.
 * **overview**: analysed vs total, queued, running, failed, ready to import, speed and ETA.
 
 ### Pause, cancel, retry
@@ -217,11 +219,13 @@ In each `.env`, replace `ROLE=…` with `COMPOSE_PROFILES=controller` / `worker`
 |---|---|---|
 | **pause** a batch (`s`) | frozen in place (no CPU), progress kept | none from that batch |
 | **pause** a worker (`w`) | that worker's tracks frozen in place | that worker takes none |
-| **resume** | carry on from where they were | yes |
+| **resume** (`s` again, on a paused or cancelled batch) | carry on from where they were | yes |
 | **cancel** a batch (`c`) | finish normally | none from that batch |
 
 Pausing freezes ffmpeg (SIGSTOP/SIGCONT), so a two-hour track paused at 90% still only has 10% left
-when resumed, and paused time doesn't count towards its timeout. Paused tracks stay claimed by
+when resumed, and paused time doesn't count towards its timeout or its elapsed time. A batch and a
+worker are paused separately: resuming a batch doesn't resume a worker you paused with `w` (the
+batch then shows *worker paused*, and the TUI tells you which worker to resume). Paused tracks stay claimed by
 their worker. If that worker is stopped altogether, they go back to the queue after 10 minutes.
 
 **Retry failed** (`t`, or `plex-loudness batches retry <batch>`) queues only the batch's *failed

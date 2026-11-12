@@ -27,7 +27,7 @@ from textual.widgets import (
 
 from . import __version__
 from .analysis import FULL, QUICK
-from .batches import Queue
+from .batches import Queue, run_seconds
 from .catalog import Filter, libraries, parse_when, parse_years, preview, select_jobs
 from .config import Config
 from .importer import apply_import, plan_import
@@ -84,17 +84,22 @@ class Confirm(ModalScreen[bool]):
     """
     BINDINGS = [("escape", "no", "Cancel"), ("y", "yes", "Yes")]
 
-    def __init__(self, message: str, yes: str = "Yes", title: str = "confirm"):
+    def __init__(self, message: str, yes: str = "Yes", title: str = "confirm", no: str = "cancel",
+                 danger: bool = False):
         super().__init__()
-        self.message, self.yes, self.title_text = message, yes, title
+        self.message, self.yes, self.title_text, self.no = message, yes, title, no
+        self.danger = danger
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog") as dialog:
             dialog.border_title = self.title_text
             yield Static(self.message)
             with Horizontal():
-                yield Button("cancel", id="no")
-                yield Button(self.yes, id="yes", classes="go")
+                yield Button(self.no, id="no")
+                yield Button(self.yes, id="yes", classes="danger" if self.danger else "go")
+
+    def on_mount(self) -> None:
+        self.query_one("#no", Button).focus()      # Enter on a reflex keeps things as they are
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
@@ -125,8 +130,9 @@ class LoudnessApp(App):
     #main {{ height: 1fr; margin: 0 1; }}
     #queue-panel {{ width: 60; border: round {PINK}; border-title-color: {PINK}; }}
     #right {{ width: 1fr; }}
-    #batches-panel {{ height: 3fr; border: round {BLUE}; border-title-color: {BLUE}; }}
-    #now-panel {{ height: 2fr; border: round {CYAN}; border-title-color: {CYAN}; }}
+    #batches-panel {{ height: 1fr; min-height: 12; border: round {BLUE}; border-title-color: {BLUE}; }}
+    #now-panel {{ height: 1fr; min-height: 15; border: round {CYAN}; border-title-color: {CYAN}; }}
+    #active {{ min-height: 6; }}
     #log {{ height: 7; border: round #6a7dff; border-title-color: #6a7dff; border-title-align: center;
             border-title-style: bold; background: transparent; margin: 0 1; padding: 0 1; }}
     #hints {{ height: 1; color: grey; content-align: center middle; }}
@@ -156,8 +162,8 @@ class LoudnessApp(App):
     Button.danger {{ border: round #ff5f5f; color: #ff5f5f; }}
     """
     BINDINGS = [("q", "quit", "quit"), ("p", "preview", "preview"), ("a", "queue", "queue"),
-                ("i", "import_batch", "import"), ("t", "retry", "retry"), ("s", "pause_batch", "pause"),
-                ("c", "cancel", "cancel"), ("w", "pause_worker", "pause worker"), ("d", "delete", "delete"),
+                ("i", "import_batch", "import"), ("t", "retry", "retry"), ("s", "pause_batch", "pause/resume"),
+                ("c", "cancel", "cancel"), ("w", "pause_worker", "pause/resume worker"), ("d", "delete", "delete"),
                 ("l", "reload_libraries", "libraries"), ("f5", "refresh", "refresh")]
 
     def __init__(self, config: Config):
@@ -209,13 +215,15 @@ class LoudnessApp(App):
                     with Horizontal(classes="buttons"):
                         yield Button("import into plex", id="import-btn", classes="ok")
                         yield Button("retry failed", id="retry-btn")
-                        yield Button("pause / resume", id="pause-btn")
-                        yield Button("cancel / resume", id="cancel-btn")
+                        yield Button("pause", id="pause-btn")
+                        yield Button("cancel", id="cancel-btn", classes="danger")
                         yield Button("delete", id="delete-btn", classes="danger")
                 with Vertical(id="now-panel", classes="panel") as panel:
                     panel.border_title = "now measuring"
                     yield DataTable(id="active", zebra_stripes=True)
                     yield DataTable(id="workers", cursor_type="row", zebra_stripes=True)
+                    with Horizontal(classes="buttons"):
+                        yield Button("pause worker", id="worker-btn")
         log = RichLog(id="log", wrap=True, markup=True)
         log.border_title = "activity"
         yield log
@@ -224,11 +232,11 @@ class LoudnessApp(App):
     def on_mount(self) -> None:
         self.query_one("#batches", DataTable).add_columns(
             "batch", "mode", "state", "tracks", "ok", "failed", "running", "audio h", "filter")
-        self.query_one("#active", DataTable).add_columns("worker", "elapsed", "done", "mem", "title", "track")
+        self.query_one("#active", DataTable).add_columns("worker", "batch", "elapsed", "done", "mem", "title", "track")
         self.query_one("#workers", DataTable).add_columns("worker", "state", "busy", "cpu", "mem", "host",
                                                           "ok", "failed", "speed", "version")
         keys = [("q", "quit"), ("p", "preview"), ("a", "add batch"), ("i", "import"), ("t", "retry"),
-                ("s", "pause batch"), ("w", "pause worker"), ("c", "cancel"), ("d", "delete"),
+                ("s", "pause/resume batch"), ("w", "pause/resume worker"), ("c", "cancel"), ("d", "delete"),
                 ("l", "libraries"), ("tab", "next field")]
         self.query_one("#hints", Static).update(
             Text.from_markup("  ·  ".join(f"[bold {CYAN}]{k}[/] {v}" for k, v in keys)))
@@ -396,10 +404,14 @@ class LoudnessApp(App):
         keep = self.selected_batch
         table.clear()
         ordered = list(reversed(summaries))
+        alive = [w for w in workers if w["alive"]]
+        held = bool(alive) and all(w.get("paused") or w.get("pause_requested") for w in alive)
         for s in ordered:
             done = s["ok"] + s["failed"]
-            table.add_row(Text(s["id"], style="#e0e0e0"), Text(s["mode"], style="grey62"),
-                          Text(s["state"], style=STATE_STYLE.get(s["state"], "")),
+            state = Text(s["state"], style=STATE_STYLE.get(s["state"], ""))
+            if held and s["state"] in ("running", "queued"):
+                state = Text("worker paused", style=f"bold {AMBER}")
+            table.add_row(Text(s["id"], style="#e0e0e0"), Text(s["mode"], style="grey62"), state,
                           f"{s['tracks']:,}", Text(f"{s['ok']:,}", style=MINT if done else ""),
                           Text(f"{s['failed']:,}", style="#ff5f5f" if s["failed"] else "grey50"),
                           Text(str(s["running"]), style=CYAN if s["running"] else "grey50"),
@@ -410,6 +422,7 @@ class LoudnessApp(App):
             table.move_cursor(row=ids.index(keep))
         active = self.query_one("#active", DataTable)
         active.clear()
+        known = {s["id"] for s in summaries}
         wtable = self.query_one("#workers", DataTable)
         keep_worker = self.selected_worker
         wtable.clear()
@@ -438,7 +451,10 @@ class LoudnessApp(App):
                 pct = 100 * a["position"] / a["total"] if a.get("total") else 0
                 done = Text(f"⏸ {pct:3.0f}%", style=f"bold {AMBER}") if a.get("paused") else \
                     Text(f"{pct:3.0f}%", style=f"bold {PINK}")
-                active.add_row(Text(w["name"], style=CYAN), human(time.time() - a["started"]), done,
+                batch_name = a.get("batch", "")
+                batch_text = (Text(batch_name.split("-", 2)[-1][:18], style="grey62") if batch_name in known
+                              else Text("deleted", style="#ff5f5f"))
+                active.add_row(Text(w["name"], style=CYAN), batch_text, human(run_seconds(a)), done,
                                Text(f"{a.get('rss_mb', 0)} MB", style="grey62"), a["title"][:64],
                                Text(a["codec"], style="grey62"))
         names = [w["name"] for w in workers]
@@ -449,12 +465,41 @@ class LoudnessApp(App):
         self.query_one("#batches-panel").border_subtitle = f"{len(summaries)} batches"
         self.update_overview()
         self.update_subtitle()
+        self.update_buttons()
+
+    def update_buttons(self) -> None:
+        """pause turns into resume for a paused or cancelled batch; cancel is off once cancelled."""
+        s = next((s for s in self.summaries if s["id"] == self.selected_batch), None)
+        state = s["state"] if s else ""
+        pause = self.query_one("#pause-btn", Button)
+        pause.label = "resume" if state in ("paused", "cancelled") else "pause"
+        pause.disabled = state in ("finished", "imported")
+        self.query_one("#cancel-btn", Button).disabled = state in ("cancelled", "finished", "imported")
+        worker = self.current_worker()
+        button = self.query_one("#worker-btn", Button)
+        button.label = f"{'resume' if worker and self.queue.worker_paused(worker) else 'pause'} worker" + \
+            (f" {worker}" if worker else "")
+        button.disabled = worker is None
+
+    def current_worker(self) -> str | None:
+        """The highlighted worker, or the only one there is."""
+        names = [w["name"] for w in self.worker_rows]
+        if self.selected_worker in names:
+            return self.selected_worker
+        return names[0] if len(names) == 1 else None
+
+    def warn_paused_workers(self) -> None:
+        for name in self.queue.paused_workers():
+            self.log_line(f"[bold {AMBER}]worker {name} is paused itself[/], so its tracks stay frozen: "
+                          f"press [bold {CYAN}]resume worker[/] (w) under now measuring")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "batches" and event.row_key is not None:
             self.selected_batch = event.row_key.value
+            self.update_buttons()
         elif event.data_table.id == "workers" and event.row_key is not None:
             self.selected_worker = event.row_key.value
+            self.update_buttons()
 
     def selected(self):
         if not self.selected_batch:
@@ -504,22 +549,23 @@ class LoudnessApp(App):
         batch = self.selected()
         if not batch:
             return
-        if batch.paused:
-            batch.unpause()
+        if batch.paused or batch.cancelled:
+            batch.resume()
             self.log_line(f"resumed {batch.id} [grey50](frozen tracks carry on)[/]")
+            self.warn_paused_workers()
         else:
             batch.pause()
             self.log_line(f"paused {batch.id} [grey50](running tracks freeze within a few seconds, progress kept)[/]")
         self.action_refresh()
 
     def action_pause_worker(self) -> None:
-        name = self.selected_worker
+        name = self.current_worker()
         if not name:
             self.log_line("[yellow]select a worker first (in the list under now measuring)[/]")
             return
         if self.queue.worker_paused(name):
             self.queue.resume_worker(name)
-            self.log_line(f"resumed worker {name}")
+            self.log_line(f"resumed worker {name} [grey50](frozen tracks carry on)[/]")
         else:
             self.queue.pause_worker(name)
             self.log_line(f"paused worker {name} [grey50](frees its CPU; tracks stay claimed and carry on when resumed)[/]")
@@ -530,12 +576,18 @@ class LoudnessApp(App):
         if not batch:
             return
         if batch.cancelled:
-            batch.resume()
-            self.log_line(f"resumed {batch.id}")
-        else:
-            batch.cancel()
-            self.log_line(f"cancelled {batch.id} [grey50](running tracks finish)[/]")
-        self.action_refresh()
+            self.log_line(f"{batch.id} is already cancelled [grey50](resume it with s / the resume button)[/]")
+            return
+
+        def answered(yes: bool) -> None:
+            if yes:
+                batch.cancel()
+                self.log_line(f"cancelled {batch.id} [grey50](running tracks finish; resume picks it up again)[/]")
+                self.action_refresh()
+
+        self.push_screen(Confirm(f"Cancel [bold]{batch.id}[/]?\n\n[grey62]Running tracks finish and no new ones "
+                                 "start. Results so far are kept, and resume picks the batch up again.[/]",
+                                 yes="cancel batch", no="keep it", title="cancel batch", danger=True), answered)
 
     def action_delete(self) -> None:
         batch = self.selected()
@@ -556,7 +608,7 @@ class LoudnessApp(App):
         actions = {"preview-btn": self.action_preview, "queue-btn": self.queue_batch,
                    "import-btn": self.action_import_batch, "retry-btn": self.action_retry,
                    "pause-btn": self.action_pause_batch, "cancel-btn": self.action_cancel,
-                   "delete-btn": self.action_delete}
+                   "delete-btn": self.action_delete, "worker-btn": self.action_pause_worker}
         if event.button.id in actions:
             actions[event.button.id]()
 

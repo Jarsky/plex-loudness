@@ -28,6 +28,17 @@ def map_path(path: str, mapping: dict[str, str]) -> str:
     return path
 
 
+class TrackStop:
+    """Stops one track: when the worker stops, or when the track's batch has been deleted."""
+
+    def __init__(self, worker_stop: threading.Event):
+        self.worker_stop, self.dropped = worker_stop, threading.Event()
+        self.missing = 0
+
+    def is_set(self) -> bool:
+        return self.worker_stop.is_set() or self.dropped.is_set()
+
+
 class PathResolver:
     """Plex path -> path on this worker: explicit PATH_MAP first, else auto-detected.
 
@@ -71,6 +82,7 @@ class Worker:
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.active: dict[tuple[str, int], dict] = {}
+        self.track_stops: dict[tuple[str, int], TrackStop] = {}
         self.stats = {"ok": 0, "failed": 0, "measured_s": 0.0, "audio_s": 0.0}
         self.started = time.time()
         # pause state, refreshed from the shared folder every loop (see refresh_pauses)
@@ -101,6 +113,19 @@ class Worker:
             print(f"{time.strftime('%H:%M:%S')} {'paused: running tracks frozen, taking no new ones' if self.self_paused else 'resumed'}",
                   flush=True)
 
+    def drop_deleted(self) -> None:
+        """Kill tracks whose batch was deleted from the controller, freeing their slots for other batches."""
+        with self.lock:
+            running = [(key, a["batch_path"], a["title"]) for key, a in self.active.items()]
+        for key, batch_path, title in running:
+            stop = self.track_stops.get(key)
+            if not stop or stop.dropped.is_set():
+                continue
+            stop.missing = 0 if Batch(batch_path).exists() else stop.missing + 1
+            if stop.missing >= 2:            # twice in a row, so a share hiccup doesn't kill a long track
+                stop.dropped.set()
+                print(f"{time.strftime('%H:%M:%S')} dropped  {title[:55]}: batch {key[0]} was deleted", flush=True)
+
     def is_paused(self, batch_id: str) -> bool:
         return self.self_paused or batch_id in self.paused_batches
 
@@ -119,16 +144,27 @@ class Worker:
         duration = (job.get("duration_ms") or 0) / 1000
         info = {"batch": batch.id, "batch_path": str(batch.path), "stream_id": stream["stream_id"],
                 "title": job["title"], "codec": stream["codec"], "started": time.time(),
-                "position": 0.0, "total": duration if mode.exact else mode.samples * mode.seconds, "pid": None}
+                "position": 0.0, "total": duration if mode.exact else mode.samples * mode.seconds, "pid": None,
+                "paused_s": 0.0, "paused_since": None}
+        track_stop = TrackStop(self.stop)
         with self.lock:
             self.active[key] = info
+            self.track_stops[key] = track_stop
 
         def progress(position: float, pid: int) -> None:
             info["position"], info["pid"] = position, pid
 
         def paused() -> bool:
-            info["paused"] = self.is_paused(batch.id)
-            return info["paused"]
+            # also keeps the paused time, so the controller's elapsed timer stands still while paused
+            now = time.time()
+            frozen = self.is_paused(batch.id)
+            if frozen and not info.get("paused_since"):
+                info["paused_since"] = now
+            elif not frozen and info.get("paused_since"):
+                info["paused_s"] = info.get("paused_s", 0.0) + now - info["paused_since"]
+                info["paused_since"] = None
+            info["paused"] = frozen
+            return frozen
 
         try:
             if not os.path.exists(path):
@@ -138,7 +174,7 @@ class Worker:
                                    f"{self.config.worker.media_root}, or set PATH_MAP)"}
             else:
                 timeout = duration * self.config.worker.timeout_factor + self.config.worker.timeout_base
-                record = measure_track(path, stream, duration, mode, timeout, progress, self.stop, paused,
+                record = measure_track(path, stream, duration, mode, timeout, progress, track_stop, paused,
                                        stall=self.config.worker.stall_seconds)
             if record["status"] == "stopped":
                 return
@@ -156,6 +192,7 @@ class Worker:
             batch.release(stream["stream_id"])
             with self.lock:
                 self.active.pop(key, None)
+            self.track_stops.pop(key, None)
 
     def next_tracks(self, free: int) -> list:
         """Claim up to `free` tracks, oldest batch first (none while this worker is paused)."""
@@ -192,6 +229,7 @@ class Worker:
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.slots) as pool:
             while not self.stop.is_set():
                 self.refresh_pauses()
+                self.drop_deleted()
                 futures = {f for f in futures if not f.done()}
                 free = self.slots - len(futures)
                 picked = self.next_tracks(free) if free else []

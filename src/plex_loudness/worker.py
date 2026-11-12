@@ -19,6 +19,7 @@ from .analysis import Mode, measure_track, rss_mb
 from .batches import Batch, Queue
 from .config import Config, load
 from .resources import Sampler
+from .schedule import Schedule, load_schedule
 
 
 def map_path(path: str, mapping: dict[str, str]) -> str:
@@ -88,6 +89,8 @@ class Worker:
         # pause state, refreshed from the shared folder every loop (see refresh_pauses)
         self.self_paused = False
         self.paused_batches: set[str] = set()
+        self.schedule = Schedule()
+        self.off_hours = False             # outside the schedule's window: as if paused
         self.sampler = Sampler()           # CPU/memory of this container and its host, per heartbeat
         self.paths = PathResolver(config.worker.path_map, config.worker.media_root,
                                   log=lambda text: print(f"{time.strftime('%H:%M:%S')} {text}", flush=True))
@@ -100,7 +103,8 @@ class Worker:
         elapsed = time.time() - self.started
         return {"version": __version__, "slots": self.slots, "started": self.started, "elapsed": elapsed,
                 "active": sorted(active, key=lambda a: a["started"]), "stopping": self.stop.is_set(),
-                "paused": self.self_paused, "resources": self.sampler.sample(),
+                "paused": self.self_paused, "off_hours": self.off_hours, "schedule": self.schedule.status(),
+                "resources": self.sampler.sample(),
                 "ok": stats["ok"], "failed": stats["failed"], "audio_hours": stats["audio_s"] / 3600,
                 "rate": stats["audio_s"] / elapsed if elapsed > 60 else 0}
 
@@ -112,6 +116,14 @@ class Worker:
         if self.self_paused != was:
             print(f"{time.strftime('%H:%M:%S')} {'paused: running tracks frozen, taking no new ones' if self.self_paused else 'resumed'}",
                   flush=True)
+        was_off, old = self.off_hours, self.schedule
+        self.schedule = load_schedule(self.config.work_dir)
+        self.off_hours = not self.schedule.is_open()
+        if self.schedule != old:
+            print(f"{time.strftime('%H:%M:%S')} schedule: {self.schedule.status()}", flush=True)
+        elif self.off_hours != was_off:
+            print(f"{time.strftime('%H:%M:%S')} schedule: {self.schedule.status()}"
+                  f"{' (running tracks frozen until then)' if self.off_hours else ''}", flush=True)
 
     def drop_deleted(self) -> None:
         """Kill tracks whose batch was deleted from the controller, freeing their slots for other batches."""
@@ -127,7 +139,7 @@ class Worker:
                 print(f"{time.strftime('%H:%M:%S')} dropped  {title[:55]}: batch {key[0]} was deleted", flush=True)
 
     def is_paused(self, batch_id: str) -> bool:
-        return self.self_paused or batch_id in self.paused_batches
+        return self.self_paused or self.off_hours or batch_id in self.paused_batches
 
     def heartbeat(self) -> None:
         while not self.stop.wait(15):
@@ -197,7 +209,7 @@ class Worker:
     def next_tracks(self, free: int) -> list:
         """Claim up to `free` tracks, oldest batch first (none while this worker is paused)."""
         picked = []
-        if self.self_paused:
+        if self.self_paused or self.off_hours:
             return picked
         for batch in self.queue.batches():
             if self.only_batch and not batch.id.startswith(self.only_batch):

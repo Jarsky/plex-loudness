@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.0
+- **Schedule**: pick the days and hours workers may run (TUI **schedule** button / `h`, or
+  `plex-loudness schedule --days mon-thu --from 02:00 --to 10:00`; `schedule off` = 24x7).
+  Outside the window workers pause themselves: running tracks freeze with their progress kept and
+  carry on when the window opens, so long tracks can span several nights. Windows can cross
+  midnight (22:00-06:00 counts as the day it starts). One schedule for all workers, kept in the
+  shared folder; times are each worker's local time. Batches and workers show *off-hours*.
+
 ## 2.2.1
 - **Deleting a batch stops its running tracks.** Workers kept measuring a deleted batch's tracks
   (hours, for a long film in full mode), so a new batch sat at *queued* with no free slots, and the

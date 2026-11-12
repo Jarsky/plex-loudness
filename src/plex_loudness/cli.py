@@ -25,6 +25,7 @@ from .importer import apply_import, plan_import, selftest
 from .plexdb import PlexDB
 from .resources import describe as describe_resources
 from .resources import overloaded
+from .schedule import load_schedule, parse_days, parse_time, save_schedule
 
 
 def human(seconds: float) -> str:
@@ -90,6 +91,7 @@ def print_batches(queue: Queue, limit: int = 15) -> None:
 
 def print_workers(queue: Queue) -> None:
     workers = queue.workers()
+    print(f"schedule: {load_schedule(queue.work).status()}")
     if not workers:
         print("No workers have reported in yet.")
         return
@@ -97,6 +99,8 @@ def print_workers(queue: Queue) -> None:
         state = "alive" if w["alive"] else f"silent for {human(time.time() - w['updated'])}"
         if w.get("paused") or w.get("pause_requested"):
             state += ", PAUSED" if w.get("paused") else ", pause requested"
+        if w["alive"] and w.get("off_hours"):
+            state += ", outside the schedule"
         print(f"worker {w['name']}: {state}, {len(w.get('active', []))}/{w.get('slots', '?')} busy, "
               f"{w.get('ok', 0)} ok / {w.get('failed', 0)} failed, {w.get('audio_hours', 0):.1f} h of audio, "
               f"{w.get('rate', 0):.0f}x real time, v{w.get('version', '?')}")
@@ -191,6 +195,33 @@ def cmd_workers(config, args) -> int:
         else:
             queue.resume_worker(name)
             print(f"Resuming {name}")
+    return 0
+
+
+def cmd_schedule(config, args) -> int:
+    """Show or change when workers may run. Outside the window they pause themselves."""
+    schedule = load_schedule(config.work_dir)
+    if args.action == "show" and not (args.days or args.start or args.end):
+        print(f"schedule: {schedule.status()}")
+        return 0
+    if args.action == "off":
+        schedule.enabled = False
+    else:                                  # on / set (or show with options)
+        try:
+            if args.days:
+                schedule.days = parse_days(args.days)
+            if args.start:
+                schedule.start = parse_time(args.start)
+            if args.end:
+                schedule.end = parse_time(args.end)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        schedule.enabled = True
+    save_schedule(config.work_dir, schedule)
+    print(f"schedule: {schedule.status()}")
+    if schedule.enabled:
+        print("Outside the window workers freeze their running tracks (progress kept) and start no new ones."
+              " Times are each worker's local time.")
     return 0
 
 
@@ -328,6 +359,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", nargs="?", default="list", choices=["list", "pause", "resume"])
     p.add_argument("worker", nargs="?", help="worker name (a unique prefix is enough), or 'all'")
 
+    p = sub.add_parser("schedule", help="when workers may run, e.g. --days mon-thu --from 02:00 --to 10:00",
+                       description="Workers only measure inside the window; outside it they pause (running "
+                                   "tracks frozen, progress kept). 'off' runs 24x7. A window like 22:00-06:00 "
+                                   "crosses midnight and belongs to the day it starts on.")
+    p.add_argument("action", nargs="?", default="show", choices=["show", "set", "on", "off"])
+    p.add_argument("--days", help="mon-thu, mon,wed,fri, weekdays, weekends or all")
+    p.add_argument("--from", dest="start", metavar="HH:MM", help="window start")
+    p.add_argument("--to", dest="end", metavar="HH:MM", help="window end (same as start = all day)")
+
     p = sub.add_parser("watch", help="live text view of batches and workers")
     p.add_argument("--interval", type=float, default=5)
     p.add_argument("--once", action="store_true")
@@ -354,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"tui": cmd_tui, "libraries": cmd_libraries, "status": cmd_status, "queue": cmd_queue,
-            "batches": cmd_batches, "workers": cmd_workers, "watch": cmd_watch, "import": cmd_import, "compare": cmd_compare,
+            "batches": cmd_batches, "workers": cmd_workers, "schedule": cmd_schedule, "watch": cmd_watch, "import": cmd_import, "compare": cmd_compare,
             "selftest": cmd_selftest, "backup": cmd_backup, "config": cmd_config}
 
 

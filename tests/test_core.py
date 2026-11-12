@@ -330,3 +330,20 @@ def test_tracks_of_a_deleted_batch_are_dropped_and_leave_no_folder_behind(tmp_pa
     assert stop.is_set() and not worker.stop.is_set()
     batch.add_result("nas", {"stream_id": 1, "status": "ok"})
     assert not batch.path.exists()
+
+
+def test_worker_outside_the_schedule_takes_nothing_and_freezes_its_tracks(tmp_path):
+    from plex_loudness.schedule import Schedule, save_schedule
+    config = Config()
+    config.work_dir = str(tmp_path)
+    queue = Queue(tmp_path)
+    queue.create("movies", [{"title": "x", "file": "/x", "duration_ms": 1000, "part_id": 1, "size": 1,
+                             "streams": [{"stream_id": 1, "index": 1, "codec": "aac"}]}], FULL.as_dict(), "", "t")
+    worker = Worker(config, slots=1)
+    save_schedule(tmp_path, Schedule(enabled=True, days=[], start="00:00", end="00:00"))   # never open
+    worker.refresh_pauses()
+    assert worker.off_hours and worker.is_paused("any") and worker.next_tracks(1) == []
+    assert worker.status()["off_hours"]
+    save_schedule(tmp_path, Schedule(enabled=False))
+    worker.refresh_pauses()
+    assert not worker.off_hours and len(worker.next_tracks(1)) == 1

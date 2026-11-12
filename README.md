@@ -228,6 +228,26 @@ worker are paused separately: resuming a batch doesn't resume a worker you pause
 batch then shows *worker paused*, and the TUI tells you which worker to resume). Paused tracks stay claimed by
 their worker. If that worker is stopped altogether, they go back to the queue after 10 minutes.
 
+### Schedule
+
+Workers can be limited to certain days and hours, for example while the server is otherwise
+idle: **schedule** (`h`) in the TUI, under the workers list, or from the command line:
+
+```bash
+plex-loudness schedule --days mon-thu --from 02:00 --to 10:00   # set (and turn on)
+plex-loudness schedule                                          # show: "... · closed, opens Mon 02:00"
+plex-loudness schedule off                                      # run 24x7 again (on: back to the saved window)
+```
+
+Outside the window every worker pauses itself, the same way as **pause worker**: running tracks
+freeze with their progress kept and carry on when the window opens, so a long film can be measured
+over several nights. Frozen ffmpeg processes keep their memory (150-400 MB each) but use no CPU.
+A window that crosses midnight (`--from 22:00 --to 06:00`) counts as the day it starts on, and the
+same start and end means all day. Days: `mon-thu`, `mon,wed,fri`, `weekdays`, `weekends`, `all`.
+There is one schedule for all workers, stored in the shared folder (`schedule.json`). Times are each
+worker's local time, so give workers the right `TZ`. Batches and workers show *off-hours* while
+the window is closed.
+
 **Retry failed** (`t`, or `plex-loudness batches retry <batch>`) queues only the batch's *failed
 tracks* again. Tracks that succeeded, and the other tracks of the same file, aren't measured again.
 A retried track is measured from its start, since a killed ffmpeg run can't be continued. The error
@@ -266,6 +286,7 @@ plex-loudness watch                                    # live text view
 plex-loudness batches [show|pause|resume|cancel|retry|delete] <batch>
 plex-loudness workers [list]                           # each worker's state, CPU, memory, host load
 plex-loudness workers pause|resume <name|all>          # free a machine's CPU without losing progress
+plex-loudness schedule [on|off] [--days mon-thu] [--from 02:00] [--to 10:00]   # when workers may run
 plex-loudness import <batch> --dry-run
 plex-loudness import <batch>                           # backs up, writes, verifies
 plex-loudness compare <batch> --plex                   # against Plex's own values

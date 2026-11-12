@@ -34,6 +34,7 @@ from .importer import apply_import, plan_import
 from .plexdb import PlexDB
 from .resources import describe as describe_resources
 from .resources import overloaded
+from .schedule import DAYS, Schedule, load_schedule, parse_time, save_schedule
 
 NEON = ["#ff2bd6", "#d63bff", "#9b5cff", "#6a7dff", "#3fa0ff", "#22d3ee", "#22f5c8"]
 PINK, VIOLET, BLUE, CYAN, MINT = "#ff2bd6", "#9b5cff", "#3fa0ff", "#22d3ee", "#22f5c8"
@@ -111,6 +112,74 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(True)
 
 
+class ScheduleScreen(ModalScreen[Schedule | None]):
+    """Pick the days and hours workers may run, or turn the schedule off (24x7)."""
+    DEFAULT_CSS = f"""
+    ScheduleScreen {{ align: center middle; background: black 60%; }}
+    #sched {{ width: 78; height: auto; padding: 1 2; border: round {CYAN}; background: #1e1e1e;
+              border-title-color: {CYAN}; border-title-style: bold; border-title-align: center; }}
+    #sched .days {{ height: auto; margin-top: 1; }}
+    #sched .days Checkbox {{ width: 1fr; margin: 0; }}
+    #sched .times {{ height: auto; margin-top: 1; }}
+    #sched .times Label {{ padding: 1 1 0 0; }}
+    #sched .times Input {{ width: 12; }}
+    #sched #sched-error {{ color: #ff5f5f; height: auto; }}
+    #sched .actions {{ height: auto; margin-top: 1; align-horizontal: right; }}
+    """
+    BINDINGS = [("escape", "close", "Cancel")]
+
+    def __init__(self, schedule: Schedule):
+        super().__init__()
+        self.schedule = schedule
+
+    def compose(self) -> ComposeResult:
+        s = self.schedule
+        with Vertical(id="sched") as box:
+            box.border_title = "schedule"
+            yield Checkbox("only run inside this window  [dim](off = run 24×7)[/]", s.enabled, id="sched-on")
+            with Horizontal(classes="days"):
+                for i, day in enumerate(DAYS):
+                    yield Checkbox(day.title(), i in s.days, id=f"day-{i}")
+            with Horizontal(classes="times"):
+                yield Label("from")
+                yield Input(s.start, placeholder="02:00", id="sched-start")
+                yield Label("  to")
+                yield Input(s.end, placeholder="10:00", id="sched-end")
+            yield Static("[grey62]Outside the window workers pause: running tracks freeze with their progress "
+                         "kept and carry on when it opens. 22:00 to 06:00 crosses midnight and counts as the "
+                         "day it starts. The same time twice means all day. Times are each worker's own "
+                         "clock.[/]", classes="hint")
+            yield Static("", id="sched-error")
+            with Horizontal(classes="actions"):
+                yield Button("cancel", id="sched-cancel")
+                yield Button("save", id="sched-save", classes="go")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "sched-cancel":
+            self.dismiss(None)
+            return
+        try:
+            days = [i for i in range(7) if self.query_one(f"#day-{i}", Checkbox).value]
+            enabled = self.query_one("#sched-on", Checkbox).value
+            if enabled and not days:
+                raise ValueError("pick at least one day, or turn the schedule off")
+            schedule = Schedule(enabled=enabled, days=days or list(range(7)),
+                                start=parse_time(self.query_one("#sched-start", Input).value),
+                                end=parse_time(self.query_one("#sched-end", Input).value))
+        except ValueError as exc:
+            self.query_one("#sched-error", Static).update(str(exc))
+            return
+        self.dismiss(schedule)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()                       # Enter saves here, rather than running the app's preview
+        self.query_one("#sched-save", Button).press()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class LoudnessApp(App):
     TITLE = "plex-loudness"
     CSS = f"""
@@ -164,6 +233,7 @@ class LoudnessApp(App):
     BINDINGS = [("q", "quit", "quit"), ("p", "preview", "preview"), ("a", "queue", "queue"),
                 ("i", "import_batch", "import"), ("t", "retry", "retry"), ("s", "pause_batch", "pause/resume"),
                 ("c", "cancel", "cancel"), ("w", "pause_worker", "pause/resume worker"), ("d", "delete", "delete"),
+                ("h", "schedule", "schedule"),
                 ("l", "reload_libraries", "libraries"), ("f5", "refresh", "refresh")]
 
     def __init__(self, config: Config):
@@ -176,6 +246,7 @@ class LoudnessApp(App):
         self.selected_batch: str | None = None
         self.selected_worker: str | None = None
         self.summaries: list[dict] = []
+        self.schedule = Schedule()
         self.worker_rows: list[dict] = []
 
     # ------------------------------------------------------------------ layout
@@ -224,6 +295,7 @@ class LoudnessApp(App):
                     yield DataTable(id="workers", cursor_type="row", zebra_stripes=True)
                     with Horizontal(classes="buttons"):
                         yield Button("pause worker", id="worker-btn")
+                        yield Button("schedule", id="schedule-btn")
         log = RichLog(id="log", wrap=True, markup=True)
         log.border_title = "activity"
         yield log
@@ -236,7 +308,7 @@ class LoudnessApp(App):
         self.query_one("#workers", DataTable).add_columns("worker", "state", "busy", "cpu", "mem", "host",
                                                           "ok", "failed", "speed", "version")
         keys = [("q", "quit"), ("p", "preview"), ("a", "add batch"), ("i", "import"), ("t", "retry"),
-                ("s", "pause/resume batch"), ("w", "pause/resume worker"), ("c", "cancel"), ("d", "delete"),
+                ("s", "pause/resume batch"), ("w", "pause/resume worker"), ("h", "schedule"), ("c", "cancel"), ("d", "delete"),
                 ("l", "libraries"), ("tab", "next field")]
         self.query_one("#hints", Static).update(
             Text.from_markup("  ·  ".join(f"[bold {CYAN}]{k}[/] {v}" for k, v in keys)))
@@ -259,7 +331,8 @@ class LoudnessApp(App):
         rate = sum(w.get("rate", 0) for w in alive)
         bits = [f"v{__version__}", f"plex: {self.db.describe()}",
                 f"{len(alive)} worker{'s' if len(alive) != 1 else ''} · {sum(w.get('slots', 0) for w in alive)} slots",
-                f"{rate:.0f}× real time" if rate else "idle", self.config.work_dir]
+                f"{rate:.0f}× real time" if rate else "idle", f"schedule: {self.schedule.status()}",
+                self.config.work_dir]
         self.query_one("#subtitle", Static).update(Text("  ·  ".join(bits), style="grey62", justify="center"))
 
     def log_line(self, text: str) -> None:
@@ -396,6 +469,7 @@ class LoudnessApp(App):
     def load_queue(self) -> None:
         summaries = [b.summary() for b in self.queue.batches()[-40:]]
         workers = self.queue.workers()
+        self.schedule = load_schedule(self.config.work_dir)
         self.call_from_thread(self.show_queue, summaries, workers)
 
     def show_queue(self, summaries: list[dict], workers: list[dict]) -> None:
@@ -406,11 +480,15 @@ class LoudnessApp(App):
         ordered = list(reversed(summaries))
         alive = [w for w in workers if w["alive"]]
         held = bool(alive) and all(w.get("paused") or w.get("pause_requested") for w in alive)
+        off_hours = bool(alive) and all(w.get("off_hours") or w.get("paused") or w.get("pause_requested")
+                                        for w in alive) and not held
         for s in ordered:
             done = s["ok"] + s["failed"]
             state = Text(s["state"], style=STATE_STYLE.get(s["state"], ""))
             if held and s["state"] in ("running", "queued"):
                 state = Text("worker paused", style=f"bold {AMBER}")
+            elif off_hours and s["state"] in ("running", "queued"):
+                state = Text("off-hours", style=f"bold {AMBER}")
             table.add_row(Text(s["id"], style="#e0e0e0"), Text(s["mode"], style="grey62"), state,
                           f"{s['tracks']:,}", Text(f"{s['ok']:,}", style=MINT if done else ""),
                           Text(f"{s['failed']:,}", style="#ff5f5f" if s["failed"] else "grey50"),
@@ -434,6 +512,8 @@ class LoudnessApp(App):
                 state = Text("paused", style=f"bold {AMBER}")
             elif w.get("pause_requested"):
                 state = Text("pausing…", style=AMBER)      # marker set, worker hasn't seen it yet (or is older)
+            elif w.get("off_hours"):
+                state = Text("off-hours", style=f"bold {AMBER}")   # outside the schedule
             else:
                 state = Text("alive", style=f"bold {MINT}")
             res = (w.get("resources") or {}) if w["alive"] else {}
@@ -571,6 +651,18 @@ class LoudnessApp(App):
             self.log_line(f"paused worker {name} [grey50](frees its CPU; tracks stay claimed and carry on when resumed)[/]")
         self.action_refresh()
 
+    def action_schedule(self) -> None:
+        def saved(schedule: Schedule | None) -> None:
+            if schedule is None:
+                return
+            save_schedule(self.config.work_dir, schedule)
+            self.schedule = schedule
+            self.log_line(f"schedule: [bold {CYAN}]{schedule.status()}[/]"
+                          + (" [grey50](workers pick it up within a few seconds)[/]" if schedule.enabled else ""))
+            self.action_refresh()
+
+        self.push_screen(ScheduleScreen(load_schedule(self.config.work_dir)), saved)
+
     def action_cancel(self) -> None:
         batch = self.selected()
         if not batch:
@@ -608,7 +700,8 @@ class LoudnessApp(App):
         actions = {"preview-btn": self.action_preview, "queue-btn": self.queue_batch,
                    "import-btn": self.action_import_batch, "retry-btn": self.action_retry,
                    "pause-btn": self.action_pause_batch, "cancel-btn": self.action_cancel,
-                   "delete-btn": self.action_delete, "worker-btn": self.action_pause_worker}
+                   "delete-btn": self.action_delete, "worker-btn": self.action_pause_worker,
+                   "schedule-btn": self.action_schedule}
         if event.button.id in actions:
             actions[event.button.id]()
 
